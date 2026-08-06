@@ -1,0 +1,27 @@
+# Composer dependencies
+/vendor/
+
+# Composer lock file (include this if you want reproducible installs across all contributors)
+# composer.lock
+
+# PHPUnit cache
+.phpunit.result.cache
+.phpunit.cache/
+
+# IDE / editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Build / cache artifacts
+/var/
+/cache/
+*.log
