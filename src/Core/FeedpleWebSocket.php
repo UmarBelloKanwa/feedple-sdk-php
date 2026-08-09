@@ -33,8 +33,8 @@ class FeedpleWebSocket
     // ── Timing constants (mirrors websocket.py) ─────────────────────────────
     public const PING_INTERVAL       = 10;   // seconds
     public const PONG_TIMEOUT        = 10;   // seconds
-    public const RECONNECT_DELAY     = 5;    // seconds
-    public const MAX_RECONNECT_DELAY = 60;   // seconds
+    public const RECONNECT_DELAY     = 2;    // seconds
+    public const MAX_RECONNECT_DELAY = 10;   // seconds
 
     // ── Connection state ────────────────────────────────────────────────────
     /** @var WebSocket|null  The live WebSocket connection, null when disconnected */

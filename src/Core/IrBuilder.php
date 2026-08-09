@@ -252,16 +252,34 @@ class IrBuilder
         ];
 
         if (isset($comparisonMap[$operator])) {
+            // Check if value is a raw SQL datetime expression like CURRENT_TIMESTAMP - INTERVAL '30 days' or NOW()
+            if (is_string($value) && preg_match('/^(CURRENT_TIMESTAMP|NOW\(\)|CURRENT_DATE)\b/i', trim($value))) {
+                return ["{$colSql} {$comparisonMap[$operator]} {$value}", []];
+            }
             return ["{$colSql} {$comparisonMap[$operator]} ?", [$value]];
         }
 
-        // IN operator (mirrors col.in_(value))
+        // IN / NOT IN operators
         if (in_array($operator, ['in', 'in_'], strict: true)) {
             if (!is_array($value)) {
                 throw new \InvalidArgumentException("Value for 'in' operator must be an array");
             }
+            if (empty($value)) {
+                return ["1 = 0", []];
+            }
             $placeholders = implode(', ', array_fill(0, count($value), '?'));
             return ["{$colSql} IN ({$placeholders})", array_values($value)];
+        }
+
+        if (in_array($operator, ['not in', 'not_in', 'not_in_'], strict: true)) {
+            if (!is_array($value)) {
+                throw new \InvalidArgumentException("Value for 'not in' operator must be an array");
+            }
+            if (empty($value)) {
+                return ["1 = 1", []];
+            }
+            $placeholders = implode(', ', array_fill(0, count($value), '?'));
+            return ["{$colSql} NOT IN ({$placeholders})", array_values($value)];
         }
 
         // LIKE / ILIKE operators (mirrors col.like / col.ilike)
@@ -269,7 +287,6 @@ class IrBuilder
             return ["{$colSql} LIKE ?", [$value]];
         }
         if ($operator === 'ilike') {
-            // Most DBs: use ILIKE (PostgreSQL) or LOWER() workaround
             return ["{$colSql} ILIKE ?", [$value]];
         }
 
