@@ -31,7 +31,7 @@ use React\Promise\Deferred;
 class FeedpleWebSocket
 {
     // ── Timing constants (mirrors websocket.py) ─────────────────────────────
-    public const PING_INTERVAL       = 30;   // seconds
+    public const PING_INTERVAL       = 10;   // seconds
     public const PONG_TIMEOUT        = 10;   // seconds
     public const RECONNECT_DELAY     = 5;    // seconds
     public const MAX_RECONNECT_DELAY = 60;   // seconds
@@ -322,8 +322,16 @@ class FeedpleWebSocket
                 }
                 break;
 
-            case 'ir.request':
-                $this->handleIrRequest($message);
+            case 'schema.ack':
+                $status  = $message['payload']['status'] ?? 'stored';
+                $version = $message['payload']['schema_version'] ?? 1;
+                $this->logger->info("Feedple: schema.ack received (status: {$status}, version: {$version})");
+                break;
+
+            case 'error':
+                $reason = $message['payload']['reason'] ?? 'unknown';
+                $code   = $message['payload']['code'] ?? 'SERVER_ERROR';
+                $this->logger->warning("Feedple: server error received ({$code}): {$reason}");
                 break;
 
             default:
@@ -384,6 +392,20 @@ class FeedpleWebSocket
         }
     }
 
+    public function sendInspectingStatus(): void
+    {
+        if ($this->authenticated) {
+            $this->send($this->makeMessage('schema.inspecting', []));
+        }
+    }
+
+    public function sendSchemaUnchanged(): void
+    {
+        if ($this->authenticated) {
+            $this->send($this->makeMessage('schema.unchanged', []));
+        }
+    }
+
     /**
      * Send the database schema to the server in chunks.
      *
@@ -425,35 +447,46 @@ class FeedpleWebSocket
         $total      = count($tables);
         $schemaHash = SchemaServices::generateSchemaHash($schema);
 
-        $this->send($this->makeMessage('schema.started', ['table_count' => $total]));
+        try {
+            $this->send($this->makeMessage('schema.started', ['table_count' => $total]));
 
-        $chunks    = array_chunk($tables, $chunkSize, preserve_keys: true);
-        $chunkTotal = count($chunks);
-        $processed  = 0;
+            $chunks    = array_chunk($tables, $chunkSize, preserve_keys: true);
+            $chunkTotal = count($chunks);
+            $processed  = 0;
 
-        foreach ($chunks as $chunkIndex => $chunk) {
-            foreach (array_keys($chunk) as $tableName) {
-                $processed++;
-                $this->send($this->makeMessage('schema.progress', [
-                    'table'     => $tableName,
-                    'processed' => $processed,
-                    'total'     => $total,
-                    'percent'   => (int) (($processed / $total) * 100),
+            foreach ($chunks as $chunkIndex => $chunk) {
+                foreach (array_keys($chunk) as $tableName) {
+                    $processed++;
+                    $this->send($this->makeMessage('schema.progress', [
+                        'table'     => $tableName,
+                        'processed' => $processed,
+                        'total'     => $total,
+                        'percent'   => (int) (($processed / $total) * 100),
+                    ]));
+                }
+
+                $this->send($this->makeMessage('schema.data', [
+                    'chunk_index' => $chunkIndex,
+                    'chunk_total' => $chunkTotal,
+                    'data'        => $chunk,
+                    'schema_hash' => $schemaHash,
                 ]));
             }
 
-            $this->send($this->makeMessage('schema.data', [
-                'chunk_index' => $chunkIndex,
-                'chunk_total' => $chunkTotal,
-                'data'        => $chunk,
+            $this->send($this->makeMessage('schema.completed', [
                 'schema_hash' => $schemaHash,
+                'table_count' => $total,
             ]));
+        } catch (\Throwable $e) {
+            $this->logger->warning("Feedple: schema transmission interrupted ({$e->getMessage()}), will retry upon reconnect");
+            if ($this->authDeferred !== null) {
+                $this->authDeferred->promise()->then(function () use ($schema, $chunkSize) {
+                    if (!$this->stopRequested) {
+                        $this->sendSchema($schema, $chunkSize);
+                    }
+                });
+            }
         }
-
-        $this->send($this->makeMessage('schema.completed', [
-            'schema_hash' => $schemaHash,
-            'table_count' => $total,
-        ]));
     }
 
     /**

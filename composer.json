@@ -1,5 +1,6 @@
 {
     "name": "feedple/feedple-sdk",
+    "version": "0.0.1",
     "description": "Official PHP SDK for the Feedple AI platform",
     "type": "library",
     "license": "MIT",

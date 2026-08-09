@@ -464,27 +464,45 @@ class FeedpleSDK
     public function syncSchema(): void
     {
         $this->log('info', 'Feedple: inspecting database schema...');
+        $this->ws?->sendInspectingStatus();
 
-        $schema = SchemaServices::getSchema($this->db, $this->identity);
-
-        $this->log('info', sprintf('Feedple: schema inspected (%d tables found)', count($schema)));
-
-        $newHash = SchemaServices::generateSchemaHash($schema);
-        if ($this->previousHash !== null && $this->previousHash === $newHash) {
-            $this->log('info', 'Feedple: schema unchanged, skipping sync');
-            return;
+        if ($this->loop !== null) {
+            $this->loop->addTimer(0.05, function (): void {
+                $this->doSyncSchema();
+            });
+        } else {
+            $this->doSyncSchema();
         }
+    }
 
-        if ($this->ws === null) {
-            $this->log('info', 'Feedple: skipping schema transmission (main process has no WebSocket connection; the background worker handles this)');
+    private function doSyncSchema(): void
+    {
+        try {
+            $schema = SchemaServices::getSchema($this->db, $this->identity);
+
+            $this->log('info', sprintf('Feedple: schema inspected (%d tables found)', count($schema)));
+
+            $newHash = SchemaServices::generateSchemaHash($schema);
+            if ($this->previousHash !== null && $this->previousHash === $newHash) {
+                $this->log('info', 'Feedple: schema unchanged, skipping sync');
+                $this->ws?->sendSchemaUnchanged();
+                return;
+            }
+
+            if ($this->ws === null) {
+                $this->log('info', 'Feedple: skipping schema transmission (main process has no WebSocket connection; the background worker handles this)');
+                $this->previousHash = $newHash;
+                return;
+            }
+
+            $this->log('info', 'Feedple: sending schema via WebSocket...');
+            $this->ws->sendSchema($schema);
             $this->previousHash = $newHash;
-            return;
+            $this->log('info', 'Feedple: schema sent successfully');
+        } catch (\Throwable $e) {
+            $this->log('warning', "Feedple: schema sync failed: {$e->getMessage()}");
+            $this->ws?->sendSchemaUnchanged();
         }
-
-        $this->log('info', 'Feedple: sending schema via WebSocket...');
-        $this->ws->sendSchema($schema);
-        $this->previousHash = $newHash;
-        $this->log('info', 'Feedple: schema sent successfully');
     }
 
     /**
