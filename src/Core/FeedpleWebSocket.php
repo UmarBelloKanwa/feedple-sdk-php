@@ -330,6 +330,10 @@ class FeedpleWebSocket
                 $this->logger->info("Feedple: schema.ack received (status: {$status}, version: {$version})");
                 break;
 
+            case 'ir.request':
+                $this->handleIrRequest($message);
+                break;
+
             case 'error':
                 $reason = $message['payload']['reason'] ?? 'unknown';
                 $code   = $message['payload']['code'] ?? 'SERVER_ERROR';
