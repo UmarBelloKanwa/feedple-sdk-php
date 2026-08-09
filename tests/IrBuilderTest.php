@@ -221,6 +221,26 @@ class IrBuilderTest extends TestCase
         $this->assertSame(['pending', 'active'], $params);
     }
 
+    public function testMultiSourceRelation(): void
+    {
+        $ir = [
+            'operation' => 'query',
+            'table'     => 'user',
+            'fields'    => [['column' => 'user.id', 'expression' => null, 'alias' => null]],
+            'multi_source_relation' => [
+                ['table' => 'refreshtoken', 'entity_key' => 'user_id', 'timestamp_column' => 'created_at'],
+                ['table' => 'cortexchatlogs', 'entity_key' => 'user_id', 'timestamp_column' => 'created_at'],
+            ],
+            'group_by'  => ['user.id'],
+            'having'    => [['column' => 'MAX(event_stream.event_at)', 'operator' => '<', 'value' => 'CURRENT_TIMESTAMP - INTERVAL \'30 days\'']],
+        ];
+
+        ['sql' => $sql, 'params' => $params] = IrBuilder::buildQueryFromIr($ir);
+
+        $this->assertStringContainsString('LEFT JOIN (SELECT "user_id" AS entity_ref, "created_at" AS event_at FROM "refreshtoken" UNION ALL SELECT "user_id" AS entity_ref, "created_at" AS event_at FROM "cortexchatlogs") AS event_stream ON event_stream.entity_ref = "user"."id"', $sql);
+        $this->assertStringContainsString('HAVING', $sql);
+    }
+
     public function testLikeOperator(): void
     {
         $ir = [

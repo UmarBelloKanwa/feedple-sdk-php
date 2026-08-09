@@ -189,10 +189,9 @@ class FeedpleWebSocket
                 try {
                     $this->authenticate();
                 } catch (\Throwable $e) {
-                    $this->logger->error("Feedple: auth failed, not reconnecting: {$e->getMessage()}");
+                    $this->logger->warning("Feedple: auth request failed: {$e->getMessage()}, reconnecting in {$currentDelay}s");
                     $conn->close();
-                    // Auth failures are terminal (mirrors Python's PermissionError break)
-                    $this->stopRequested = true;
+                    $this->handleConnectFailure($e, $currentDelay);
                     return;
                 }
 
@@ -305,7 +304,10 @@ class FeedpleWebSocket
                 $reason = $message['payload']['reason'] ?? 'unknown';
                 $this->logger->error("Feedple: auth failed: {$reason}");
                 $this->authDeferred?->reject(new AuthException("Auth failed: {$reason}"));
-                $this->stopRequested = true;
+                $reasonLower = strtolower($reason);
+                if (str_contains($reasonLower, 'invalid api key') || str_contains($reasonLower, 'unauthorized')) {
+                    $this->stopRequested = true;
+                }
                 $this->ws?->close();
                 break;
 
@@ -611,8 +613,9 @@ class FeedpleWebSocket
         // Extract status code from the HTTP response line
         if (preg_match('/HTTP\/[\d.]+ (\d{3})/', $statusLine, $m)) {
             $code = (int) $m[1];
-            if ($code >= 400) {
-                throw new \RuntimeException("HTTP probe failed: {$code}: {$body}");
+            // Status codes 2xx, 3xx, 400, 404, 405, 426 indicate the server port is UP and listening
+            if ($code >= 500) {
+                throw new \RuntimeException("HTTP probe failed with server error {$code}: {$body}");
             }
         } elseif ($body === false) {
             throw new \RuntimeException("HTTP probe network error: could not reach {$url}");

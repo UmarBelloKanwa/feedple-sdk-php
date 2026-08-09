@@ -70,7 +70,19 @@ class IrBuilder
             $sql .= self::buildJoinClause($join);
         }
 
-        // 4. WHERE clause
+        // 3b. Multi-source evidence relation derived JOIN
+        if (!empty($ir['multi_source_relation'])) {
+            $unionParts = [];
+            foreach ($ir['multi_source_relation'] as $src) {
+                $uTbl = self::quoteIdentifier($src['table']);
+                $uKey = self::quoteIdentifier($src['entity_key']);
+                $uTs  = self::quoteIdentifier($src['timestamp_column']);
+                $unionParts[] = "SELECT {$uKey} AS entity_ref, {$uTs} AS event_at FROM {$uTbl}";
+            }
+            $unionSql = implode(" UNION ALL ", $unionParts);
+            $baseTblQuoted = self::quoteIdentifier($baseTable);
+            $sql     .= " LEFT JOIN ({$unionSql}) AS event_stream ON event_stream.entity_ref = {$baseTblQuoted}.\"id\"";
+        }
         if (!empty($ir['filters'])) {
             [$whereSql, $whereParams] = self::buildConditionList($ir['filters']);
             $sql    .= " WHERE {$whereSql}";
@@ -312,6 +324,11 @@ class IrBuilder
      */
     private static function resolveColumnRef(string $ref): string
     {
+        if (preg_match('/^(MAX|MIN|COUNT|SUM|AVG)\s*\((.+)\)$/i', trim($ref), $matches)) {
+            $fn = strtoupper($matches[1]);
+            $inner = self::resolveColumnRef($matches[2]);
+            return "{$fn}({$inner})";
+        }
         if (str_contains($ref, '.')) {
             [$tablePart, $colPart] = explode('.', $ref, 2);
             return self::quoteIdentifier($tablePart) . '.' . self::quoteIdentifier($colPart);
