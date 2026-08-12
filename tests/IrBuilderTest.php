@@ -416,4 +416,33 @@ class IrBuilderTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertSame('Alice', $rows[0]['name']);
     }
+
+    public function testFilterGroupsOrLogic(): void
+    {
+        $ir = [
+            'operation' => 'query',
+            'table'     => 'user',
+            'fields'    => [
+                ['column' => 'user.full_name', 'expression' => null, 'alias' => null],
+            ],
+            'filters'   => [
+                ['column' => 'user.account_status', 'operator' => 'eq', 'value' => 'active'],
+            ],
+            'filter_groups' => [
+                [
+                    'logic'   => 'or',
+                    'filters' => [
+                        ['column' => 'user.full_name', 'operator' => 'ilike', 'value' => '%Alice%'],
+                        ['column' => 'user.email',     'operator' => 'ilike', 'value' => '%Alice%'],
+                    ],
+                ],
+            ],
+        ];
+
+        ['sql' => $sql, 'params' => $params] = IrBuilder::buildQueryFromIr($ir);
+
+        $this->assertStringContainsString('WHERE "user"."account_status" = ? AND ("user"."full_name" ILIKE ? OR "user"."email" ILIKE ?)', $sql);
+        $this->assertSame(['active', '%Alice%', '%Alice%'], $params);
+    }
 }
+

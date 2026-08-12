@@ -83,10 +83,35 @@ class IrBuilder
             $baseTblQuoted = self::quoteIdentifier($baseTable);
             $sql     .= " LEFT JOIN ({$unionSql}) AS event_stream ON event_stream.entity_ref = {$baseTblQuoted}.\"id\"";
         }
+        // 4. WHERE clause (filters AND filter_groups)
+        $whereParts = [];
         if (!empty($ir['filters'])) {
             [$whereSql, $whereParams] = self::buildConditionList($ir['filters']);
-            $sql    .= " WHERE {$whereSql}";
-            $params  = array_merge($params, $whereParams);
+            if ($whereSql !== '') {
+                $whereParts[] = $whereSql;
+                $params = array_merge($params, $whereParams);
+            }
+        }
+        if (!empty($ir['filter_groups'])) {
+            foreach ($ir['filter_groups'] as $group) {
+                if (empty($group['filters'])) {
+                    continue;
+                }
+                $logic = strtoupper($group['logic'] ?? 'OR');
+                $glue = ($logic === 'AND') ? ' AND ' : ' OR ';
+                $groupParts = [];
+                foreach ($group['filters'] as $f) {
+                    [$fSql, $fParams] = self::buildFilterCondition($f);
+                    $groupParts[] = $fSql;
+                    $params = array_merge($params, $fParams);
+                }
+                if (!empty($groupParts)) {
+                    $whereParts[] = '(' . implode($glue, $groupParts) . ')';
+                }
+            }
+        }
+        if (!empty($whereParts)) {
+            $sql .= ' WHERE ' . implode(' AND ', $whereParts);
         }
 
         // 5. GROUP BY clause
