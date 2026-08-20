@@ -3,7 +3,7 @@
     "description": "Official PHP SDK for the Feedple AI platform",
     "type": "library",
     "license": "MIT",
-    "keywords": ["feedple", "sdk", "ai", "database", "websocket"],
+    "keywords": ["feedple", "sdk", "ai", "database", "realtime"],
     "homepage": "https://github.com/UmarBelloKanwa/feedple-sdk",
     "authors": [
         {

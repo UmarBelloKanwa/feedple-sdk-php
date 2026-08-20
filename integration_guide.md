@@ -22,7 +22,7 @@ Regardless of where you place the initialization code, the Feedple SDK follows a
    - The main process captures the background worker's PID, saves it to the local `.pid` file, and **immediately returns control to your application**. It does not wait for the worker to begin syncing.
 4. **Persistent Execution**: 
    - Your original script or web request finishes its lifecycle normally and terminates (e.g., serving the HTTP response to the client).
-   - Meanwhile, the detached background `worker.php` process bootstraps independently. It reads the control file, establishes its own long-lived database connection, establishes a persistent WebSocket connection to Feedple, and initiates a non-blocking **ReactPHP event loop**. 
+   - Meanwhile, the detached background `worker.php` process bootstraps independently. It reads the control file, establishes its own long-lived database connection, establishes a persistent, secure background connection to Feedple, and initiates an asynchronous background worker loop. 
    - This event loop runs indefinitely, handling real-time schema syncing and inbound query requests from the Feedple platform.
 5. **Idempotency**: On subsequent requests or commands, the constructor's `.pid` check finds the existing, healthy background worker process. The SDK skips the spawning phase entirely, making the execution a cheap check that prevents duplicate worker processes.
 

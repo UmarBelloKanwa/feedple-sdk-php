@@ -48,7 +48,7 @@ Your App                      Feedple SDK                     Feedple API
     │                              │                               │
 ```
 
-1. **Connect & Authenticate** — Opens a persistent WebSocket connection and sends your API key. The server responds with a `session_id` used to resume after disconnects.
+1. **Connect & Authenticate** — Establishes a secure background connection and authenticates your API key. The server responds with a `session_id` used to resume sessions after disconnects.
 2. **Sync Schema** — Inspects your database (tables, columns, PKs, FKs, indexes) and sends the schema to Feedple in chunks. Re-syncs on a configurable interval; skips if nothing changed.
 3. **Execute Queries** — Receives incoming IR query requests from Feedple, enforces RBAC, executes them safely as parameterized PDO statements, and returns the results.
 
@@ -135,7 +135,7 @@ $sdk = new FeedpleSDK(
 
     // Optional
     logger: $psrLogger,           // PSR-3 LoggerInterface; defaults to stderr output
-    wsUrl:  'ws://...',           // Override the WebSocket URL (defaults to FEEDPLE_WS_URL)
+    wsUrl:  'https://...',        // Override the default Feedple server URL
 );
 ```
 
@@ -150,9 +150,9 @@ $sdk = new FeedpleSDK(
 | `syncInterval` | `int` | `60` | Seconds between schema re-sync cycles. |
 | `reconnectEnabled` | `bool` | `true` | Automatically reconnect on connection loss. |
 | `maxRetries` | `int\|null` | `null` | Cap on reconnect attempts. `null` means unlimited. |
-| `probeBeforeConnect` | `bool` | `false` | Perform an HTTP GET before the WS handshake to surface clearer server error messages (e.g. 403 bodies). |
+| `probeBeforeConnect` | `bool` | `false` | Perform a pre-connection HTTP probe to surface clearer server error messages (e.g. 403 bodies). |
 | `logger` | `LoggerInterface\|null` | `null` | PSR-3 logger. A stderr logger is used when `null`. |
-| `wsUrl` | `string\|null` | `null` | Override the default WebSocket endpoint URL. |
+| `wsUrl` | `string\|null` | `null` | Override the default Feedple server endpoint URL. |
 
 ---
 
@@ -238,7 +238,7 @@ $safeSchema = SchemaServices::filterSensitiveColumns($rawSchema);
 
 ## IR Query Execution
 
-The SDK receives IR (Intermediate Representation) query objects from the Feedple server and executes them as **parameterized PDO statements** against your database. You do not call this yourself — it is invoked automatically via the WebSocket.
+The SDK receives IR (Intermediate Representation) query objects from the Feedple server and executes them as **parameterized PDO statements** against your database. You do not call this yourself — it is invoked automatically over the background connection.
 
 ### IR Schema
 
@@ -320,7 +320,7 @@ The `session_id` received in `auth.ack` is stored in `$ws->sessionId` and re-sen
 $sdk->stop();
 ```
 
-Closes the WebSocket connection and stops the ReactPHP event loop. Safe to call from a signal handler:
+Closes the background connection and stops the worker event loop. Safe to call from a signal handler:
 
 ```php
 // Graceful shutdown on SIGTERM / SIGINT
@@ -605,7 +605,7 @@ class JsonSerializer
 
 | Class | Extends | When thrown |
 |-------|---------|-------------|
-| `AuthException` | `RuntimeException` | WebSocket authentication fails (`auth.error` received) |
+| `AuthException` | `RuntimeException` | Connection authentication fails (`auth.error` received) |
 | `SchemaSyncException` | `RuntimeException` | Schema sync HTTP/API call fails |
 | `IrExecutionException` | `RuntimeException` | IR query execution error (unused directly — `RuntimeException` is thrown inline) |
 

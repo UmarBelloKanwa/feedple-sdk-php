@@ -27,11 +27,11 @@ This guide provides an exhaustive walkthrough of the SDK's architecture, install
 ## 1. Overview
 
 ### What is the Feedple PHP SDK?
-`feedple/feedple-sdk` is an asynchronous, background-managed PHP library designed to connect your application's relational database (PostgreSQL, MySQL, SQLite, etc.) to Feedple AI. It connects your PDO database connection with Feedple's intelligence server through a secure, persistent WebSocket connection.
+`feedple/feedple-sdk` is an asynchronous, background-managed PHP library designed to connect your application's relational database (PostgreSQL, MySQL, SQLite, etc.) to Feedple AI. It connects your PDO database connection with Feedple's intelligence server through a secure, persistent background connection.
 
 ### The Problem It Solves
 Integrating AI platforms with PHP databases traditionally presents two major challenges:
-1. **Blocking Lifecycle**: Traditional PHP scripts follow a short-lived request/response lifecycle (`CGI` / `FPM`) that cannot maintain long-lived WebSocket connections without blocking HTTP client responses.
+1. **Blocking Lifecycle**: Traditional PHP scripts follow a short-lived request/response lifecycle (`CGI` / `FPM`) that cannot maintain persistent background connections without blocking HTTP client responses.
 2. **Security Vulnerabilities**: Exposing database ports directly to cloud providers or passing database credentials through loose strings creates credential leakage risks.
 
 The Feedple PHP SDK solves these issues:
@@ -39,7 +39,7 @@ The Feedple PHP SDK solves these issues:
 - **Zero-Blocking Architecture**: Uses `proc_open()` to spawn a completely detached, background worker process (`src/worker.php`) running a non-blocking ReactPHP event loop. The main process returns control to your application instantly (0ms latency impact on web requests).
 - **Cross-Platform Compatibility**: Requires no `pcntl` or `posix` extensions, making it 100% compatible across Linux, macOS, and Windows environments.
 - **Credential Protection**: Uses PHP 8.2 `#[\SensitiveParameter]` attributes to automatically redact database passwords from exception stack traces and Sentry/Bugsnag error trackers.
-- **Automated Schema Synchronization**: Introspects database structures (tables, columns, PKs, FKs, indexes) and transmits schema updates over WebSockets using SHA-256 hash change detection.
+- **Automated Schema Synchronization**: Introspects database structures (tables, columns, PKs, FKs, indexes) and transmits schema updates securely using SHA-256 hash change detection.
 - **Safe IR Query Execution**: Receives structured Intermediate Representation (IR) JSON objects, translates them into parameterized PDO statements via `IrBuilder`, and executes them safely against your database engine.
 - **Table-Level RBAC**: Enforces strict table-level access rules before any query touches the database.
 
@@ -70,7 +70,7 @@ composer require feedple/feedple-sdk
 | :--- | :--- | :--- |
 | `php` | `>= 8.1` | Modern PHP engine features (strict types, `readonly`, `#[\SensitiveParameter]`) |
 | `react/event-loop` | `^1.5` | Non-blocking event loop for the background worker process |
-| `ratchet/pawl` | `^0.4` | Asynchronous WebSocket client built on ReactPHP |
+| `ratchet/pawl` | `^0.4` | Asynchronous background connection client |
 | `monolog/monolog` | `^3.0` | PSR-3 logging framework support |
 | `psr/log` | `^3.0` | PSR-3 logger interface definitions |
 
@@ -94,7 +94,7 @@ sdk-php/
     ├── FeedpleSDK.php            # Main SDK client, background launcher, and orchestrator
     ├── worker.php                # Standalone background worker process entrypoint
     └── Core/
-        ├── FeedpleWebSocket.php  # Persistent Ratchet/ReactPHP WebSocket client
+        ├── FeedpleWebSocket.php  # Persistent background connection client
         ├── Identity.php          # Security dataclass defining tenant table access rules
         ├── IrBuilder.php         # IR JSON to parameterized SQL string & params builder
         ├── JsonSerializer.php  # Safe JSON encoder handling DateTimeInterface & objects
@@ -102,7 +102,7 @@ sdk-php/
         ├── SchemaServices.php    # Schema introspection, hashing, and sensitive column filter
         ├── SqlCompiler.php       # Regex-based SQL table extractor & policy validator
         └── Exceptions/
-            ├── AuthException.php         # Thrown when WebSocket authentication fails
+            ├── AuthException.php         # Thrown when authentication handshake fails
             ├── IrExecutionException.php  # Thrown when IR query build/execution fails
             └── SchemaSyncException.php # Thrown on schema synchronization failures
 ```
@@ -116,7 +116,7 @@ sdk-php/
 - **`Feedple\Sdk\Core\IrBuilder`**: Translates flat IR JSON objects into `['sql' => string, 'params' => array]` for PDO prepared statements.
 - **`Feedple\Sdk\Core\SqlCompiler`**: Regex table extractor for raw SQL statements that validates table access against `PolicyEngine`.
 - **`Feedple\Sdk\Core\SchemaServices`**: Introspects MySQL, PostgreSQL, and SQLite databases using `INFORMATION_SCHEMA` or `PRAGMA` queries. Computes SHA-256 schema hashes and strips sensitive columns.
-- **`Feedple\Sdk\Core\FeedpleWebSocket`**: Persistent Ratchet Pawl WebSocket client managing authentication, ping/pong heartbeats, chunked schema transmission (`sendSchema`), and IR request routing.
+- **`Feedple\Sdk\Core\FeedpleWebSocket`**: Persistent connection client managing authentication, heartbeats, chunked schema transmission (`sendSchema`), and IR request routing.
 - **`Feedple\Sdk\Core\JsonSerializer`**: Encodes/decodes JSON safely, serializing `DateTimeInterface` objects to ISO 8601 (`ATOM`) strings and stripping private `_`-prefixed object properties.
 
 ---
@@ -168,7 +168,7 @@ When `new FeedpleSDK(...)` executes:
 1. The SDK connects to your database via PDO and executes `SELECT 1` to verify connectivity.
 2. It checks a local `.pid` file in the system temp directory (`sys_get_temp_dir()`).
 3. If no active worker process exists, it writes a temporary, restricted control file (`chmod 0600`) and spawns `worker.php` via `proc_open()`.
-4. The background process bootstraps ReactPHP, connects to Feedple AI via WebSockets, authenticates, and begins schema synchronization.
+4. The background process bootstraps the execution environment, connects to Feedple AI securely, authenticates, and begins schema synchronization.
 
 ---
 
@@ -188,16 +188,16 @@ Main orchestrator class.
 | `$autoloadPath` | `?string` | `null` | Path to `vendor/autoload.php`. Guessed automatically if `null`. |
 | `$autoSync` | `bool` | `true` | Automatically inspect and sync schema periodically. |
 | `$syncInterval` | `int` | `60` | Interval in seconds between background schema sync cycles. |
-| `$reconnectEnabled` | `bool` | `true` | Automatically reconnect WebSocket on connection drop. |
+| `$reconnectEnabled` | `bool` | `true` | Automatically reconnect on connection drop. |
 | `$maxRetries` | `?int` | `null` | Maximum reconnect attempts (`null` = unlimited). |
-| `$probeBeforeConnect`| `bool` | `false` | Perform HTTP GET probe prior to WebSocket handshake to surface 403 errors. |
+| `$probeBeforeConnect`| `bool` | `false` | Perform HTTP GET probe prior to handshake to surface 403 errors. |
 | `$logger` | `?LoggerInterface`| `null` | PSR-3 logger instance. Writes to `feedple-sdk.log` if `null`. |
 | `$runtimeDir` | `?string` | `null` | Directory for control/pid/log files (defaults to `sys_get_temp_dir()`). |
 
 #### Public Methods
 
 - **`syncSchema(): void`**:
-  Manually triggers database schema inspection and transmits updated definitions over WebSockets if the SHA-256 schema hash differs.
+  Manually triggers database schema inspection and transmits updated definitions over the secure connection if the SHA-256 schema hash differs.
 
 - **`stop(): void`**:
   Terminates the background worker process using cross-platform system signals (`taskkill` on Windows, `kill -TERM` on Linux/macOS) and cleans up the `.pid` file.
@@ -517,7 +517,7 @@ php artisan feedple:start
 | :--- | :--- | :--- |
 | `\InvalidArgumentException` | Empty `$apiKey`, malformed IR JSON, or invalid SQL identifier | Validate configuration input parameters |
 | `\RuntimeException` | PDO connection failure (`SELECT 1` failed) or worker process spawn failure | Check database server status, host credentials, and `proc_open()` permissions |
-| `Feedple\Sdk\Core\Exceptions\AuthException` | WebSocket authentication error (`auth.error`) | Verify Feedple API key validity in workspace dashboard |
+| `Feedple\Sdk\Core\Exceptions\AuthException` | Authentication handshake error (`auth.error`) | Verify Feedple API key validity in workspace dashboard |
 | `Feedple\Sdk\Core\Exceptions\IrExecutionException` | Error compiling or executing IR query | Inspect query filter formats and database column types |
 | `Feedple\Sdk\Core\Exceptions\SchemaSyncException` | Schema upload transmission failure | Check network connectivity to Feedple API |
 
@@ -654,7 +654,7 @@ echo "SDK worker stopped.\n";
 When `FeedpleSDK` launches a background worker:
 1. It writes a temporary JSON file (`feedple-control-*.json`) to `$runtimeDir` containing the encrypted payload (`apiKey`, base64-serialized `Identity`, array `DbConfig`).
 2. The control file is permissions-restricted with `chmod 0600`.
-3. `worker.php` reads the control file on startup, builds independent PDO & WebSocket handles, and calls `@unlink($controlFilePath)` immediately to erase credentials from disk.
+3. `worker.php` reads the control file on startup, builds independent PDO & connection handles, and calls `@unlink($controlFilePath)` immediately to erase credentials from disk.
 
 ---
 
@@ -662,7 +662,7 @@ When `FeedpleSDK` launches a background worker:
 
 During codebase analysis, three areas were identified where public API usability could be improved:
 
-#### 1. Configurable Base URL & WebSocket URL
+#### 1. Configurable Base Server URL & Connection Endpoint
 - **Current State**: `FEEDPLE_WS_URL` and `FEEDPLE_API_BASE_URL` in `src/FeedpleSDK.php` are top-level constants driven by `const FEEDPLE_DEV_ENV = true`.
 - **Usability Recommendation**: Expose a `$wsUrl` parameter in `FeedpleSDK` or read an environment variable (`FEEDPLE_WS_URL`) so developers can switch between Local, Staging, and Production environments without modifying SDK source code.
 

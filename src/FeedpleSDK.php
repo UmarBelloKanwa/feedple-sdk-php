@@ -232,7 +232,7 @@ class FeedpleSDK
         $this->ws->probeBeforeConnect = $this->probeBeforeConnect;
         $this->ws->onIrRequest(fn(array $ir): array => $this->executeIr($ir));
 
-        $this->log('info', 'Feedple: WebSocket client configured');
+        $this->log('info', 'Feedple: connection client configured');
     }
 
     /**
@@ -388,7 +388,7 @@ class FeedpleSDK
      */
     public function run(): void
     {
-        $this->log('info', 'Feedple: starting WebSocket and sync worker...');
+        $this->log('info', 'Feedple: starting background sync worker...');
 
         $this->ws->connect();
 
@@ -408,11 +408,11 @@ class FeedpleSDK
      */
     private function scheduleSyncWorker(): void
     {
-        $this->log('info', 'Feedple: sync worker started, waiting for WebSocket authentication...');
+        $this->log('info', 'Feedple: sync worker started, waiting for connection authentication...');
 
         // Register callback to run sync immediately upon authentication
         $this->ws->onAuthenticated(function (): void {
-            $this->log('info', 'Feedple: WebSocket authenticated, triggering initial schema sync...');
+            $this->log('info', 'Feedple: session authenticated, triggering initial schema sync...');
             try {
                 $this->syncSchema();
             } catch (\Throwable $e) {
@@ -490,12 +490,12 @@ class FeedpleSDK
             }
 
             if ($this->ws === null) {
-                $this->log('info', 'Feedple: skipping schema transmission (main process has no WebSocket connection; the background worker handles this)');
+                $this->log('info', 'Feedple: skipping schema transmission (main process has no active background connection; the background worker handles this)');
                 $this->previousHash = $newHash;
                 return;
             }
 
-            $this->log('info', 'Feedple: sending schema via WebSocket...');
+            $this->log('info', 'Feedple: sending schema updates...');
             $this->ws->sendSchema($schema);
             $this->previousHash = $newHash;
             $this->log('info', 'Feedple: schema sent successfully');

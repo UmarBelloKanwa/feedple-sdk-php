@@ -130,14 +130,14 @@ class FeedpleWebSocket
     {
         if ($this->ws === null) {
             $this->authenticated = false;
-            throw new \RuntimeException('WebSocket is not connected');
+            throw new \RuntimeException('Connection is not active');
         }
 
         try {
             $this->ws->send(JsonSerializer::encode($message));
         } catch (\Throwable $e) {
             $this->authenticated = false;
-            throw new \RuntimeException("WebSocket send failed: {$e->getMessage()}", previous: $e);
+            throw new \RuntimeException("Connection send failed: {$e->getMessage()}", previous: $e);
         }
     }
 
@@ -183,7 +183,7 @@ class FeedpleWebSocket
                 $this->authDeferred = new Deferred();
                 $currentDelay      = $this->reconnectDelay; // reset for next reconnect
 
-                $this->logger->info("Feedple: WebSocket connected");
+                $this->logger->info("Feedple: connection established");
 
                 // Authenticate immediately
                 try {
@@ -288,7 +288,7 @@ class FeedpleWebSocket
             case 'auth.ack':
                  $this->sessionId     = $message['payload']['session_id'] ?? null;
                  $this->authenticated = true;
-                 $this->logger->info("Feedple: WebSocket authenticated (session: {$this->sessionId})");
+                 $this->logger->info("Feedple: session authenticated (session: {$this->sessionId})");
                  // Resolve the auth deferred so syncSchema() can proceed
                  $this->authDeferred?->resolve(true);
                  if ($this->onAuthenticatedCallback !== null) {
@@ -513,7 +513,7 @@ class FeedpleWebSocket
 
         while (!$this->authenticated) {
             if ($timeout !== null && (microtime(true) - $start) >= $timeout) {
-                throw new \RuntimeException('Timed out waiting for WebSocket authentication');
+                throw new \RuntimeException('Timed out waiting for connection authentication');
             }
             // Run one tick of the event loop while we wait
             // (Loop::get() only available when running inside a ReactPHP context)
@@ -550,7 +550,7 @@ class FeedpleWebSocket
         $isRejected = $this->isServerRejection($e);
         if ($isRejected) {
             $this->logger->warning(
-                "Feedple: connection lost: server rejected WebSocket connection: {$e->getMessage()}, reconnecting in {$delay}s"
+                "Feedple: connection lost: server rejected connection: {$e->getMessage()}, reconnecting in {$delay}s"
             );
         } else {
             $prefix = $isProbeFailure ? 'pre-connect probe failed' : 'connection lost';
