@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#./release.sh
 
 set -e
 
