@@ -479,7 +479,7 @@ $sdk = new FeedpleSDK(
     apiKey:  '...',
     db:      $pdo,
     identity: $identity,
-    wsUrl:   'wss://feedple-ai.onrender.com/api/v1/tenants/ws',
+    wsUrl:   'wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws',
 );
 ```
 

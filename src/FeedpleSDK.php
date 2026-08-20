@@ -17,10 +17,10 @@ use React\EventLoop\LoopInterface;
 // ── URL constants (mirrors request.py) ──────────────────────────────────────
 
 /** @internal */
-const FEEDPLE_DEV_ENV = true;
+const FEEDPLE_DEV_ENV = false;
 
-const FEEDPLE_API_BASE_URL = (FEEDPLE_DEV_ENV ? 'http://localhost:8000' : 'https://feedple-ai.onrender.com') . '/api/v1';
-const FEEDPLE_WS_URL       = (FEEDPLE_DEV_ENV ? 'ws://localhost:8000'  : 'wss://feedple-ai.onrender.com')  . '/api/v1/tenants/ws';
+const FEEDPLE_API_BASE_URL = (FEEDPLE_DEV_ENV ? 'http://localhost:8000' : 'https://feedple-ai-614817435356.us-central1.run.app') . '/api/v1';
+const FEEDPLE_WS_URL       = (FEEDPLE_DEV_ENV ? 'ws://localhost:8000'  : 'wss://feedple-ai-614817435356.us-central1.run.app')  . '/api/v1/tenants/ws';
 
 /**
  * Main entry point for the Feedple PHP SDK — framework-agnostic, OS-agnostic.
