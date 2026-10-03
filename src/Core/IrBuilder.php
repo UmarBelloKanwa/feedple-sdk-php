@@ -174,7 +174,10 @@ class IrBuilder
 
         $parts = [];
         foreach ($fields as $field) {
-            $colRef  = $field['column'] ?? throw new \InvalidArgumentException("Field missing 'column' key");
+            if (!isset($field['column'])) {
+                throw new \InvalidArgumentException("Field missing 'column' key");
+            }
+            $colRef  = $field['column'];
             $colSql  = self::resolveColumnRef($colRef);
             $exprRaw = $field['expression'] ?? null;
 
@@ -204,8 +207,8 @@ class IrBuilder
         string $exprClean,
         string $exprRaw
     ): string {
-        if (str_contains($exprClean, 'count')) {
-            if (str_contains($exprClean, 'distinct')) {
+        if (strpos($exprClean, 'count') !== false) {
+            if (strpos($exprClean, 'distinct') !== false) {
                 return "COUNT(DISTINCT {$colSql})";
             }
             return "COUNT({$colSql})";
@@ -227,12 +230,21 @@ class IrBuilder
      */
     private static function buildJoinClause(array $join): string
     {
-        $joinTable = $join['table'] ?? throw new \InvalidArgumentException("Join missing 'table'");
-        $onLeft    = $join['on_left']  ?? throw new \InvalidArgumentException("Join missing 'on_left'");
-        $onRight   = $join['on_right'] ?? throw new \InvalidArgumentException("Join missing 'on_right'");
+        if (!isset($join['table'])) {
+            throw new \InvalidArgumentException("Join missing 'table'");
+        }
+        if (!isset($join['on_left'])) {
+            throw new \InvalidArgumentException("Join missing 'on_left'");
+        }
+        if (!isset($join['on_right'])) {
+            throw new \InvalidArgumentException("Join missing 'on_right'");
+        }
+        $joinTable = $join['table'];
+        $onLeft    = $join['on_left'];
+        $onRight   = $join['on_right'];
 
         $joinType  = strtoupper($join['join_type'] ?? 'INNER');
-        $isOuter   = in_array($joinType, ['LEFT', 'LEFT OUTER'], strict: true);
+        $isOuter   = in_array($joinType, ['LEFT', 'LEFT OUTER'], true);
 
         $keyword   = $isOuter ? 'LEFT JOIN' : 'INNER JOIN';
         $leftSql   = self::resolveColumnRef($onLeft);
@@ -273,9 +285,15 @@ class IrBuilder
      */
     private static function buildFilterCondition(array $filter): array
     {
-        $operator = strtolower($filter['operator'] ?? throw new \InvalidArgumentException("Filter missing 'operator'"));
-        $colRef   = $filter['column'] ?? throw new \InvalidArgumentException("Filter missing 'column'");
-        $value    = $filter['value']  ?? null;
+        if (!isset($filter['operator'])) {
+            throw new \InvalidArgumentException("Filter missing 'operator'");
+        }
+        if (!isset($filter['column'])) {
+            throw new \InvalidArgumentException("Filter missing 'column'");
+        }
+        $operator = strtolower($filter['operator']);
+        $colRef   = $filter['column'];
+        $value    = $filter['value'] ?? null;
         $colSql   = self::resolveColumnRef($colRef);
 
         // Comparison operators (mirrors _OPERATOR_BUILDERS dict)
@@ -297,7 +315,7 @@ class IrBuilder
         }
 
         // IN / NOT IN operators
-        if (in_array($operator, ['in', 'in_'], strict: true)) {
+        if (in_array($operator, ['in', 'in_'], true)) {
             if (!is_array($value)) {
                 throw new \InvalidArgumentException("Value for 'in' operator must be an array");
             }
@@ -308,7 +326,7 @@ class IrBuilder
             return ["{$colSql} IN ({$placeholders})", array_values($value)];
         }
 
-        if (in_array($operator, ['not in', 'not_in', 'not_in_'], strict: true)) {
+        if (in_array($operator, ['not in', 'not_in', 'not_in_'], true)) {
             if (!is_array($value)) {
                 throw new \InvalidArgumentException("Value for 'not in' operator must be an array");
             }
@@ -328,10 +346,10 @@ class IrBuilder
         }
 
         // IS NULL / IS NOT NULL operators
-        if (in_array($operator, ['is_null', 'is null'], strict: true)) {
+        if (in_array($operator, ['is_null', 'is null'], true)) {
             return ["{$colSql} IS NULL", []];
         }
-        if (in_array($operator, ['is_not_null', 'is not null'], strict: true)) {
+        if (in_array($operator, ['is_not_null', 'is not null'], true)) {
             return ["{$colSql} IS NOT NULL", []];
         }
 
@@ -354,7 +372,7 @@ class IrBuilder
             $inner = self::resolveColumnRef($matches[2]);
             return "{$fn}({$inner})";
         }
-        if (str_contains($ref, '.')) {
+        if (strpos($ref, '.') !== false) {
             [$tablePart, $colPart] = explode('.', $ref, 2);
             return self::quoteIdentifier($tablePart) . '.' . self::quoteIdentifier($colPart);
         }

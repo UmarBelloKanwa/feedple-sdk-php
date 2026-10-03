@@ -17,6 +17,13 @@ namespace Feedple\Sdk\Core;
  */
 class Identity
 {
+    /** @var string|null */
+    public $name;
+    /** @var array */
+    public $allowedTables;
+    /** @var bool */
+    public $allTables;
+
     /**
      * @param  string|null    $name          Human-readable name for this identity (e.g. "admin", "read-only").
      * @param  string[]       $allowedTables Explicit list of tables this identity may access.
@@ -24,9 +31,12 @@ class Identity
      * @param  bool           $allTables     When true, the identity can access every table in the database.
      */
     public function __construct(
-        public readonly ?string $name,
-        public readonly array   $allowedTables = [],
-        public readonly bool    $allTables     = false,
+        string $name = null,
+        array  $allowedTables = [],
+        bool   $allTables     = false
     ) {
+        $this->name          = $name;
+        $this->allowedTables = $allowedTables;
+        $this->allTables     = $allTables;
     }
 }

@@ -24,7 +24,7 @@ class JsonSerializer
      * @return string
      * @throws \JsonException on encoding error
      */
-    public static function encode(mixed $data): string
+    public static function encode($data): string
     {
         return json_encode(
             self::normalize($data),
@@ -45,7 +45,7 @@ class JsonSerializer
      * @param  mixed $value
      * @return mixed
      */
-    public static function normalize(mixed $value): mixed
+    public static function normalize($value)
     {
         if ($value instanceof DateTimeInterface) {
             // Mirrors: if isinstance(obj, (datetime, date)): return obj.isoformat()
@@ -66,7 +66,7 @@ class JsonSerializer
             $result = [];
             foreach ($props as $key => $val) {
                 // Skip private-convention properties (starting with underscore)
-                if (str_starts_with($key, '_')) {
+                if (strncmp($key, '_', 1) === 0) {
                     continue;
                 }
                 $result[$key] = self::normalize($val);
@@ -91,6 +91,6 @@ class JsonSerializer
      */
     public static function decode(string $json): array
     {
-        return json_decode($json, associative: true, flags: JSON_THROW_ON_ERROR);
+        return json_decode($json, true, 512, JSON_THROW_ON_ERROR);
     }
 }

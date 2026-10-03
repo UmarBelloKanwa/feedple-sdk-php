@@ -28,47 +28,57 @@ namespace Feedple\Sdk;
  */
 final class DbConfig implements \JsonSerializable
 {
+    /** @var string */
+    public $dsn;
+    /** @var string|null */
+    public $username;
+    /** @var string|null */
+    public $password;
+    /** @var array */
+    public $options;
+
     private function __construct(
-        public readonly string $dsn,
-        public readonly ?string $username,
-        #[\SensitiveParameter]
-        public readonly ?string $password,
-        public readonly array $options = [],
+        string $dsn,
+        string $username = null,
+        string $password = null,
+        array $options = []
     ) {
+        $this->dsn = $dsn;
+        $this->username = $username;
+        $this->password = $password;
+        $this->options = $options;
     }
 
     public static function mysql(
         string $host,
         string $database,
-        ?string $username = null,
-        #[\SensitiveParameter]
-        ?string $password = null,
+        string $username = null,
+        string $password = null,
         int $port = 3306,
         string $charset = 'utf8mb4',
-        array $options = [],
+        array $options = []
     ): self {
         return new self(
-            dsn:      "mysql:host={$host};port={$port};dbname={$database};charset={$charset}",
-            username: $username,
-            password: $password,
-            options:  $options,
+            "mysql:host={$host};port={$port};dbname={$database};charset={$charset}",
+            $username,
+            $password,
+            $options
         );
     }
 
     public static function pgsql(
         string $host,
         string $database,
-        ?string $username = null,
-        #[\SensitiveParameter]
-        ?string $password = null,
+        string $username = null,
+        string $password = null,
         int $port = 5432,
-        array $options = [],
+        array $options = []
     ): self {
         return new self(
-            dsn:      "pgsql:host={$host};port={$port};dbname={$database}",
-            username: $username,
-            password: $password,
-            options:  $options,
+            "pgsql:host={$host};port={$port};dbname={$database}",
+            $username,
+            $password,
+            $options
         );
     }
 
@@ -76,20 +86,19 @@ final class DbConfig implements \JsonSerializable
     public static function sqlite(string $path, array $options = []): self
     {
         return new self(
-            dsn:      "sqlite:{$path}",
-            username: null,
-            password: null,
-            options:  $options,
+            "sqlite:{$path}",
+            null,
+            null,
+            $options
         );
     }
 
     /** Escape hatch for any other PDO-supported driver or unusual DSN. */
     public static function raw(
         string $dsn,
-        ?string $username = null,
-        #[\SensitiveParameter]
-        ?string $password = null,
-        array $options = [],
+        string $username = null,
+        string $password = null,
+        array $options = []
     ): self {
         return new self($dsn, $username, $password, $options);
     }
@@ -106,7 +115,7 @@ final class DbConfig implements \JsonSerializable
         // "users"."id", matching Postgres/SQLite conventions. ANSI_QUOTES
         // mode makes MySQL accept that same syntax instead of throwing a
         // 1064 syntax error on every query.
-        if (str_starts_with($this->dsn, 'mysql:')) {
+        if (strncmp($this->dsn, 'mysql:', 6) === 0) {
             $pdo->exec("SET SESSION sql_mode=(SELECT CONCAT(@@sql_mode, ',ANSI_QUOTES'))");
         }
 

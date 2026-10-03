@@ -51,7 +51,7 @@ The Feedple PHP SDK solves these issues:
 > Make sure `proc_open` is enabled in `php.ini` before bootstrapping the background worker.
 
 ### Prerequisites
-- **PHP**: Version `8.1` or higher (`8.1`, `8.2`, `8.3`, `8.4+`).
+- **PHP**: Version `7.0` or higher (`7.0`, `7.1`, `7.2`, `7.3`, `7.4`, `8.0`, `8.1`, `8.2`, `8.3`, `8.4+`).
 - **PDO Extension**: `pdo` along with your database driver (`pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`).
 - **Composer**: Package manager for dependency resolution.
 - **System Functions**: `proc_open()` enabled in `php.ini` (not blacklisted in `disable_functions`).
@@ -68,11 +68,11 @@ composer require feedple/feedple-sdk
 
 | Package | Version Constraint | Purpose |
 | :--- | :--- | :--- |
-| `php` | `>= 8.1` | Modern PHP engine features (strict types, `readonly`, `#[\SensitiveParameter]`) |
+| `php` | `>= 7.0` | Universal PHP engine compatibility (PHP 7.0 through 8.4+) |
 | `react/event-loop` | `^1.5` | Non-blocking event loop for the background worker process |
 | `ratchet/pawl` | `^0.4` | Asynchronous background connection client |
-| `monolog/monolog` | `^3.0` | PSR-3 logging framework support |
-| `psr/log` | `^3.0` | PSR-3 logger interface definitions |
+| `monolog/monolog` | `^2.0 \|\| ^3.0` | PSR-3 logging framework support |
+| `psr/log` | `^1.1 \|\| ^2.0 \|\| ^3.0` | PSR-3 logger interface definitions |
 
 ---
 

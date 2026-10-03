@@ -17,9 +17,13 @@ namespace Feedple\Sdk\Core;
  */
 class PolicyEngine
 {
+    /** @var Identity */
+    public $identity;
+
     public function __construct(
-        public readonly Identity $identity,
+        Identity $identity
     ) {
+        $this->identity = $identity;
     }
 
     // ── RBAC ─────────────────────────────────────────────────────────────
@@ -34,7 +38,7 @@ class PolicyEngine
         if ($this->identity->allTables) {
             return true;
         }
-        return in_array($table, $this->identity->allowedTables, strict: true);
+        return in_array($table, $this->identity->allowedTables, true);
     }
 
     /**
@@ -46,7 +50,7 @@ class PolicyEngine
      * @param  array<string, mixed> $ir
      * @throws \RuntimeException
      */
-    public function validateIrAccess(array $ir): void
+    public function validateIrAccess(array $ir)
     {
         if ($this->identity->allTables) {
             return;

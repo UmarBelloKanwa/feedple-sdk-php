@@ -56,7 +56,7 @@ Your App                      Feedple SDK                     Feedple API
 
 ## Requirements
 
-- PHP **≥ 8.1**
+- PHP **≥ 7.0** (Fully compatible with PHP 7.0, 7.1, 7.2, 7.3, 7.4, 8.0, 8.1, 8.2, 8.3, 8.4+)
 - [Composer](https://getcomposer.org/)
 - A database accessible via **PDO** (MySQL, PostgreSQL, SQLite, and others)
 - The `pdo_<driver>` PHP extension for your database (e.g. `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`)

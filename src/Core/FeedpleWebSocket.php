@@ -38,23 +38,23 @@ class FeedpleWebSocket
 
     // ── Connection state ────────────────────────────────────────────────────
     /** @var WebSocket|null  The live WebSocket connection, null when disconnected */
-    private ?WebSocket $ws = null;
+    private $ws = null;
 
     /** @var string|null  Session ID received after auth.ack, used for session resume */
-    public ?string $sessionId = null;
+    public $sessionId = null;
 
     /** @var bool  True once auth.ack has been received on the current connection */
-    private bool $authenticated = false;
+    private $authenticated = false;
 
     /** @var bool  Set by stop() to break the reconnect loop */
-    private bool $stopRequested = false;
+    private $stopRequested = false;
 
     /** @var int  Current retry count (reset on successful connect) */
-    private int $retryCount = 0;
+    private $retryCount = 0;
 
     // ── Deferred auth resolution (replaces asyncio.Event) ──────────────────
     /** @var Deferred|null  Resolved when auth.ack is received */
-    private ?Deferred $authDeferred = null;
+    private $authDeferred = null;
 
     // ── Callbacks ──────────────────────────────────────────────────────────
     /** @var callable|null  Invoked with the IR payload; must return an array (rows/count/duration_ms) */
@@ -64,17 +64,26 @@ class FeedpleWebSocket
     private $onAuthenticatedCallback = null;
 
     // ── Configuration (public, mirroring Python's mutable attributes) ───────
-    public bool    $reconnectEnabled   = true;
-    public ?int    $maxRetries         = null;
-    public bool    $probeBeforeConnect = false;
-    public float   $reconnectDelay     = self::RECONNECT_DELAY;
+    public $reconnectEnabled   = true;
+    public $maxRetries         = null;
+    public $probeBeforeConnect = false;
+    public $reconnectDelay     = self::RECONNECT_DELAY;
+
+    private $wsUrl;
+    private $apiKey;
+    private $loop;
+    private $logger;
 
     public function __construct(
-        private readonly string          $wsUrl,
-        private readonly string          $apiKey,
-        private readonly LoopInterface   $loop,
-        private readonly LoggerInterface $logger,
+        string          $wsUrl,
+        string          $apiKey,
+        LoopInterface   $loop,
+        LoggerInterface $logger
     ) {
+        $this->wsUrl  = $wsUrl;
+        $this->apiKey = $apiKey;
+        $this->loop   = $loop;
+        $this->logger = $logger;
     }
 
     /**

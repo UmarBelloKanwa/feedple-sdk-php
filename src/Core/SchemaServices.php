@@ -61,7 +61,7 @@ class SchemaServices
         } else {
             // Validate each requested table exists before inspecting
             foreach ($identity->allowedTables as $requested) {
-                if (!in_array($requested, $allTables, strict: true)) {
+                if (!in_array($requested, $allTables, true)) {
                     throw new \ValueError("Table '{$requested}' does not exist in the database");
                 }
             }
@@ -211,7 +211,9 @@ class SchemaServices
         $ucMap = [];
         foreach ($ucRawMap as $t => $constraints) {
             $ucMap[$t] = array_map(
-                static fn(string $name, array $cols): array => ['name' => $name, 'columns' => $cols],
+                function (string $name, array $cols): array {
+                    return ['name' => $name, 'columns' => $cols];
+                },
                 array_keys($constraints),
                 array_values($constraints)
             );
@@ -273,8 +275,9 @@ class SchemaServices
         foreach ($schema as &$table) {
             $table['columns'] = array_values(array_filter(
                 $table['columns'],
-                static fn(array $col): bool =>
-                    !in_array(strtolower($col['name']), self::SENSITIVE_COLUMNS, strict: true)
+                function (array $col): bool {
+                    return !in_array(strtolower($col['name']), self::SENSITIVE_COLUMNS, true);
+                }
             ));
         }
         unset($table);
@@ -647,7 +650,9 @@ class SchemaServices
                 $ucMap[$name][] = $row['column_name'];
             }
             return array_map(
-                static fn(string $name, array $cols): array => ['name' => $name, 'columns' => $cols],
+                function (string $name, array $cols): array {
+                    return ['name' => $name, 'columns' => $cols];
+                },
                 array_keys($ucMap),
                 array_values($ucMap)
             );
@@ -671,7 +676,9 @@ class SchemaServices
             $ucMap[$name][] = $row['column_name'] ?? $row['COLUMN_NAME'];
         }
         return array_map(
-            static fn(string $name, array $cols): array => ['name' => $name, 'columns' => $cols],
+            function (string $name, array $cols): array {
+                return ['name' => $name, 'columns' => $cols];
+            },
             array_keys($ucMap),
             array_values($ucMap)
         );

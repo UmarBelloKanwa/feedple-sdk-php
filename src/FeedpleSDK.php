@@ -80,16 +80,43 @@ const FEEDPLE_WS_URL       = (FEEDPLE_DEV_ENV ? 'ws://localhost:8000'  : 'wss://
  */
 class FeedpleSDK
 {
-    private ?FeedpleWebSocket $ws = null;
-    private ?LoopInterface    $loop = null;
-    private ?string           $previousHash = null;
-    private readonly \PDO     $db;
+    /** @var FeedpleWebSocket|null */
+    private $ws = null;
+    /** @var LoopInterface|null */
+    private $loop = null;
+    /** @var string|null */
+    private $previousHash = null;
+    /** @var \PDO */
+    private $db;
 
     /** PID of the detached background worker process (set only in the launching process). */
-    private ?int $workerPid = null;
+    /** @var int|null */
+    private $workerPid = null;
 
     /** Where control/pid/log files for this instance live. */
-    private readonly string $runtimeDir;
+    /** @var string */
+    private $runtimeDir;
+
+    /** @var string */
+    private $apiKey;
+    /** @var DbConfig */
+    private $dbConfig;
+    /** @var Identity */
+    private $identity;
+    /** @var bool */
+    private $autoSync;
+    /** @var int */
+    private $syncInterval;
+    /** @var bool */
+    private $reconnectEnabled;
+    /** @var int|null */
+    private $maxRetries;
+    /** @var bool */
+    private $probeBeforeConnect;
+    /** @var LoggerInterface|null */
+    private $logger;
+    /** @var bool */
+    private $isWorkerProcess;
 
     /**
      * @param  string   $apiKey          Feedple API key (required, non-empty).
@@ -117,20 +144,31 @@ class FeedpleSDK
      * @throws \RuntimeException         if the background worker process fails to start
      */
     public function __construct(
-        private readonly string     $apiKey,
-        private readonly DbConfig   $dbConfig,
-        private readonly Identity   $identity,
-        ?string                     $autoloadPath        = null,
-        private readonly bool       $autoSync            = true,
-        private readonly int        $syncInterval        = 60,
-        private readonly bool       $reconnectEnabled    = true,
-        private readonly ?int       $maxRetries          = null,
-        private readonly bool       $probeBeforeConnect  = false,
-        private readonly ?LoggerInterface $logger        = null,
-        ?string                     $runtimeDir          = null,
+        string                     $apiKey,
+        DbConfig                   $dbConfig,
+        Identity                   $identity,
+        string                     $autoloadPath        = null,
+        bool                       $autoSync            = true,
+        int                        $syncInterval        = 60,
+        bool                       $reconnectEnabled    = true,
+        int                        $maxRetries          = null,
+        bool                       $probeBeforeConnect  = false,
+        LoggerInterface            $logger              = null,
+        string                     $runtimeDir          = null,
         /** @internal set only by runWorker(); skips re-spawning a child process. */
-        private readonly bool       $isWorkerProcess     = false,
+        bool                       $isWorkerProcess     = false
     ) {
+        $this->apiKey             = $apiKey;
+        $this->dbConfig           = $dbConfig;
+        $this->identity           = $identity;
+        $this->autoSync           = $autoSync;
+        $this->syncInterval       = $syncInterval;
+        $this->reconnectEnabled   = $reconnectEnabled;
+        $this->maxRetries         = $maxRetries;
+        $this->probeBeforeConnect = $probeBeforeConnect;
+        $this->logger             = $logger;
+        $this->isWorkerProcess    = $isWorkerProcess;
+
         if (trim($apiKey) === '') {
             throw new \InvalidArgumentException(
                 'api_key is required. Please provide a valid Feedple API key.'
@@ -145,7 +183,8 @@ class FeedpleSDK
         } catch (\Throwable $e) {
             throw new \RuntimeException(
                 "Feedple SDK could not connect to the database: " . $e->getMessage(),
-                previous: $e
+                0,
+                $e
             );
         }
 
@@ -203,13 +242,15 @@ class FeedpleSDK
 
         if (PHP_OS_FAMILY === 'Windows') {
             $output = shell_exec(sprintf('tasklist /FI "PID eq %d" 2>NUL', $pid));
-            return $output !== null && str_contains($output, (string) $pid);
+            return $output !== null && strpos($output, (string) $pid) !== false;
         }
 
         // `kill -0` is a POSIX shell built-in that checks whether a process
         // exists without actually signaling it — no posix PHP extension
         // required, so this works the same on Linux and macOS.
-        exec(sprintf('kill -0 %d 2>/dev/null', $pid), result_code: $exitCode);
+        $dummy = [];
+        $exitCode = 1;
+        exec(sprintf('kill -0 %d 2>/dev/null', $pid), $dummy, $exitCode);
         return $exitCode === 0;
     }
 
@@ -217,20 +258,22 @@ class FeedpleSDK
      * Build the WebSocket client + event loop. Only ever called inside the
      * worker process (isWorkerProcess = true).
      */
-    private function initRuntime(?string $autoloadPath): void
+    private function initRuntime(?string $autoloadPath)
     {
         $this->loop = Loop::get();
 
         $this->ws = new FeedpleWebSocket(
-            wsUrl:  FEEDPLE_WS_URL,
-            apiKey: $this->apiKey,
-            loop:   $this->loop,
-            logger: $this->buildLogger(),
+            FEEDPLE_WS_URL,
+            $this->apiKey,
+            $this->loop,
+            $this->buildLogger()
         );
         $this->ws->reconnectEnabled   = $this->reconnectEnabled;
         $this->ws->maxRetries         = $this->maxRetries;
         $this->ws->probeBeforeConnect = $this->probeBeforeConnect;
-        $this->ws->onIrRequest(fn(array $ir): array => $this->executeIr($ir));
+        $this->ws->onIrRequest(function (array $ir): array {
+            return $this->executeIr($ir);
+        });
 
         $this->log('info', 'Feedple: connection client configured');
     }
@@ -351,24 +394,26 @@ class FeedpleSDK
      *
      * @internal
      */
-    public static function runWorker(string $controlFilePath): void
+    public static function runWorker(string $controlFilePath)
     {
-        $config = json_decode((string) file_get_contents($controlFilePath), true, flags: JSON_THROW_ON_ERROR);
+        $config = json_decode((string) file_get_contents($controlFilePath), true, 512, JSON_THROW_ON_ERROR);
 
         $identity = unserialize(base64_decode($config['identity']));
         $dbConfig = DbConfig::fromArray($config['db_config']);
 
         $sdk = new self(
-            apiKey:              $config['api_key'],
-            dbConfig:            $dbConfig,
-            identity:            $identity,
-            autoloadPath:        $config['autoload_path'],
-            autoSync:            $config['auto_sync'],
-            syncInterval:        $config['sync_interval'],
-            reconnectEnabled:    $config['reconnect_enabled'],
-            maxRetries:          $config['max_retries'],
-            probeBeforeConnect:  $config['probe_before_connect'],
-            isWorkerProcess:     true,
+            $config['api_key'],
+            $dbConfig,
+            $identity,
+            $config['autoload_path'],
+            $config['auto_sync'],
+            $config['sync_interval'],
+            $config['reconnect_enabled'],
+            $config['max_retries'],
+            $config['probe_before_connect'],
+            null,
+            null,
+            true
         );
 
         // Clean up the control file — it's only needed once, at startup.
@@ -594,9 +639,24 @@ class FeedpleSDK
 
         $this->log('info', sprintf('Feedple: IR executed (%d rows, %dms)', count($rows), $durationMs));
 
+        // If the query returned a single aggregate row (e.g. COUNT(*), COUNT(col)),
+        // the actual "count" should be the aggregate value in that row, not the
+        // number of PHP rows returned (which would always be 1 for aggregates).
+        $rowCount = count($rows);
+        if ($rowCount === 1) {
+            $onlyRow = reset($rows);
+            if (is_array($onlyRow)) {
+                $vals = array_values($onlyRow);
+                // Single-column result whose value is numeric → it's an aggregate scalar
+                if (count($vals) === 1 && is_numeric($vals[0])) {
+                    $rowCount = (int) $vals[0];
+                }
+            }
+        }
+
         return [
             'rows'        => $rows,
-            'count'       => count($rows),
+            'count'       => $rowCount,
             'duration_ms' => $durationMs,
         ];
     }
@@ -608,7 +668,7 @@ class FeedpleSDK
             $this->db->query('SELECT 1');
             $this->log('info', 'Feedple: database connection verified');
         } catch (\Throwable $e) {
-            throw new \RuntimeException("Feedple SDK could not connect to the database: {$e->getMessage()}", previous: $e);
+            throw new \RuntimeException("Feedple SDK could not connect to the database: {$e->getMessage()}", 0, $e);
         }
     }
 
@@ -617,7 +677,7 @@ class FeedpleSDK
      * file. No stdio dependency, so it survives the process boundary and
      * any request lifecycle cleanly, on any OS.
      */
-    public function log(string $level, string $message): void
+    public function log(string $level, string $message)
     {
         if ($this->logger !== null) {
             $this->logger->$level($message);
@@ -628,7 +688,7 @@ class FeedpleSDK
 
         try {
             file_put_contents($this->defaultLogPath(), $line, FILE_APPEND | LOCK_EX);
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
             // logging must never take down the caller or the worker
         }
     }
@@ -649,19 +709,13 @@ class FeedpleSDK
             return $this->logger;
         }
 
-        return new class($this) implements LoggerInterface {
-            public function __construct(private readonly FeedpleSDK $sdk) {}
-            public function emergency(\Stringable|string $message, array $context = []): void { $this->write('emergency', $message); }
-            public function alert(\Stringable|string $message, array $context = []): void     { $this->write('alert',     $message); }
-            public function critical(\Stringable|string $message, array $context = []): void  { $this->write('critical',  $message); }
-            public function error(\Stringable|string $message, array $context = []): void     { $this->write('error',     $message); }
-            public function warning(\Stringable|string $message, array $context = []): void   { $this->write('warning',   $message); }
-            public function notice(\Stringable|string $message, array $context = []): void    { $this->write('notice',    $message); }
-            public function info(\Stringable|string $message, array $context = []): void      { $this->write('info',      $message); }
-            public function debug(\Stringable|string $message, array $context = []): void     { $this->write('debug',     $message); }
-            public function log($level, \Stringable|string $message, array $context = []): void { $this->write((string) $level, $message); }
-            private function write(string $level, \Stringable|string $message): void {
-                $this->sdk->log($level, (string) $message);
+        return new class($this) extends \Psr\Log\AbstractLogger {
+            /** @var FeedpleSDK */
+            private $sdk;
+            public function __construct(FeedpleSDK $sdk) { $this->sdk = $sdk; }
+            #[\ReturnTypeWillChange]
+            public function log($level, $message, array $context = []): void {
+                $this->sdk->log((string) $level, (string) $message);
             }
         };
     }

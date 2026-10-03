@@ -23,10 +23,17 @@ namespace Feedple\Sdk\Core;
  */
 class SqlCompiler
 {
+    /** @var PolicyEngine */
+    private $policy;
+    /** @var string */
+    private $dialect;
+
     public function __construct(
-        private readonly PolicyEngine $policy,
-        private readonly string       $dialect = 'postgres',
+        PolicyEngine $policy,
+        string       $dialect = 'postgres'
     ) {
+        $this->policy  = $policy;
+        $this->dialect = $dialect;
     }
 
     /**
@@ -70,7 +77,9 @@ class SqlCompiler
 
         $tables = array_map(
             // Strip any surrounding quote characters
-            static fn(string $t): string => trim($t, '`"[]'),
+            function (string $t): string {
+                return trim($t, '`"[]');
+            },
             $matches[1] ?? []
         );
 
@@ -86,7 +95,7 @@ class SqlCompiler
      * @param  string[] $tables
      * @throws \RuntimeException if any table is denied
      */
-    public function validateAccess(array $tables): void
+    public function validateAccess(array $tables)
     {
         if ($this->policy->identity->allTables) {
             return;
