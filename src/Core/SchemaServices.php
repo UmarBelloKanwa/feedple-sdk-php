@@ -72,6 +72,10 @@ class SchemaServices
             return self::getPgsqlSchemaBulk($db, $tables);
         }
 
+        if ($driver === 'mysql') {
+            return self::getMysqlSchemaBulk($db, $tables);
+        }
+
         $result = [];
         foreach ($tables as $table) {
             $result[$table] = [
@@ -80,6 +84,133 @@ class SchemaServices
                 'foreign_keys'       => self::getForeignKeys($db, $driver, $table),
                 'indexes'            => self::getIndexes($db, $driver, $table),
                 'unique_constraints' => self::getUniqueConstraints($db, $driver, $table),
+            ];
+        }
+
+        return $result;
+    }
+
+    private static function getMysqlSchemaBulk(\PDO $db, array $allowedTables): array
+    {
+        $allowedMap = array_fill_keys($allowedTables, true);
+
+        // 1. Columns
+        $columnsStmt = $db->query(
+            "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+             FROM information_schema.COLUMNS
+             WHERE TABLE_SCHEMA = DATABASE()
+             ORDER BY TABLE_NAME, ORDINAL_POSITION"
+        );
+        $columnsMap = [];
+        while ($row = $columnsStmt->fetch(\PDO::FETCH_ASSOC)) {
+            $t = $row['TABLE_NAME'] ?? $row['table_name'];
+            if (!isset($allowedMap[$t])) continue;
+            $columnsMap[$t][] = [
+                'name'     => $row['COLUMN_NAME'] ?? $row['column_name'],
+                'type'     => $row['DATA_TYPE'] ?? $row['data_type'],
+                'nullable' => strtoupper($row['IS_NULLABLE'] ?? $row['is_nullable']) === 'YES',
+                'default'  => isset($row['COLUMN_DEFAULT']) ? (string) $row['COLUMN_DEFAULT'] : null,
+            ];
+        }
+
+        // 2. Primary Keys and Foreign Keys
+        $keysStmt = $db->query(
+            "SELECT TABLE_NAME, COLUMN_NAME, CONSTRAINT_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+             FROM information_schema.KEY_COLUMN_USAGE
+             WHERE TABLE_SCHEMA = DATABASE()
+             ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION"
+        );
+        $pkMap = [];
+        $fkRawMap = [];
+        while ($row = $keysStmt->fetch(\PDO::FETCH_ASSOC)) {
+            $t = $row['TABLE_NAME'] ?? $row['table_name'];
+            if (!isset($allowedMap[$t])) continue;
+            $constraint = $row['CONSTRAINT_NAME'] ?? $row['constraint_name'];
+            $column = $row['COLUMN_NAME'] ?? $row['column_name'];
+            $refTable = $row['REFERENCED_TABLE_NAME'] ?? $row['referenced_table_name'];
+            $refCol = $row['REFERENCED_COLUMN_NAME'] ?? $row['referenced_column_name'];
+
+            if ($constraint === 'PRIMARY') {
+                $pkMap[$t][] = $column;
+            } elseif ($refTable !== null) {
+                if (!isset($fkRawMap[$t][$constraint])) {
+                    $fkRawMap[$t][$constraint] = [
+                        'columns'            => [],
+                        'references_table'   => $refTable,
+                        'references_columns' => [],
+                    ];
+                }
+                $fkRawMap[$t][$constraint]['columns'][]            = $column;
+                $fkRawMap[$t][$constraint]['references_columns'][] = $refCol;
+            }
+        }
+        $fkMap = [];
+        foreach ($fkRawMap as $t => $constraints) {
+            $fkMap[$t] = array_values($constraints);
+        }
+
+        // 3. Indexes & Unique Constraints
+        $idxStmt = $db->query(
+            "SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, NON_UNIQUE
+             FROM information_schema.STATISTICS
+             WHERE TABLE_SCHEMA = DATABASE()
+             ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX"
+        );
+        $idxRawMap = [];
+        $ucRawMap = [];
+        while ($row = $idxStmt->fetch(\PDO::FETCH_ASSOC)) {
+            $t = $row['TABLE_NAME'] ?? $row['table_name'];
+            if (!isset($allowedMap[$t])) continue;
+            $name = $row['INDEX_NAME'] ?? $row['index_name'];
+            if ($name === 'PRIMARY') continue;
+            $isUnique = (int) ($row['NON_UNIQUE'] ?? $row['non_unique']) === 0;
+            $col = $row['COLUMN_NAME'] ?? $row['column_name'];
+
+            if (!isset($idxRawMap[$t][$name])) {
+                $idxRawMap[$t][$name] = [
+                    'name'     => $name,
+                    'columns'  => [],
+                    'unique'   => $isUnique,
+                ];
+            }
+            $idxRawMap[$t][$name]['columns'][] = $col;
+
+            if ($isUnique) {
+                if (!isset($ucRawMap[$t][$name])) {
+                    $ucRawMap[$t][$name] = [
+                        'name'    => $name,
+                        'columns' => [],
+                    ];
+                }
+                $ucRawMap[$t][$name]['columns'][] = $col;
+            }
+        }
+        $idxMap = [];
+        foreach ($idxRawMap as $t => $indexes) {
+            $idxMap[$t] = array_values($indexes);
+        }
+        $ucMap = [];
+        foreach ($ucRawMap as $t => $ucs) {
+            $ucMap[$t] = array_values($ucs);
+        }
+
+        // 4. Assemble final schema dictionary
+        $result = [];
+        foreach ($allowedTables as $table) {
+            $cols = $columnsMap[$table] ?? [];
+            $filteredCols = [];
+            foreach ($cols as $c) {
+                if (in_array(strtolower($c['name']), self::SENSITIVE_COLUMNS, true)) {
+                    continue;
+                }
+                $filteredCols[] = $c;
+            }
+            $result[$table] = [
+                'columns'            => $filteredCols,
+                'primary_key'        => $pkMap[$table] ?? [],
+                'foreign_keys'       => $fkMap[$table] ?? [],
+                'indexes'            => $idxMap[$table] ?? [],
+                'unique_constraints' => $ucMap[$table] ?? [],
             ];
         }
 
