@@ -276,4 +276,33 @@ class SchemaServicesTest extends TestCase
             $this->assertArrayHasKey('unique_constraints', $tableData);
         }
     }
+
+    public function testGetRowValHandlesUppercaseKeysAndNullValues(): void
+    {
+        $refMethod = new \ReflectionMethod(SchemaServices::class, 'getRowVal');
+
+        // Test row with UPPERCASE keys and null value (reproducing PDO MySQL behavior for primary keys)
+        $rowUppercaseWithNull = [
+            'TABLE_NAME' => 'users',
+            'CONSTRAINT_NAME' => 'PRIMARY',
+            'COLUMN_NAME' => 'id',
+            'REFERENCED_TABLE_NAME' => null,
+            'REFERENCED_COLUMN_NAME' => null,
+        ];
+
+        $refTable = $refMethod->invoke(null, $rowUppercaseWithNull, 'referenced_table_name');
+        $this->assertNull($refTable);
+
+        $tableName = $refMethod->invoke(null, $rowUppercaseWithNull, 'table_name');
+        $this->assertSame('users', $tableName);
+
+        // Test row with LOWERCASE keys
+        $rowLowercase = [
+            'table_name' => 'orders',
+            'referenced_table_name' => 'users',
+        ];
+
+        $refTableLower = $refMethod->invoke(null, $rowLowercase, 'referenced_table_name');
+        $this->assertSame('users', $refTableLower);
+    }
 }
