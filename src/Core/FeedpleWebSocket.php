@@ -556,14 +556,23 @@ class FeedpleWebSocket
 
         $this->retryCount++;
 
-        $isRejected = $this->isServerRejection($e);
-        if ($isRejected) {
+        $msg = $e->getMessage();
+        $isRateLimited = str_contains($msg, '429') || str_contains($msg, 'Rate exceeded') || str_contains($msg, 'Too Many Requests');
+        if ($isRateLimited) {
+            $delay = max($delay, 30.0);
             $this->logger->warning(
-                "Feedple: connection lost: server rejected connection: {$e->getMessage()}, reconnecting in {$delay}s"
+                "Feedple: rate limit hit (429 Too Many Requests): {$msg}. Backing off for {$delay}s before retrying..."
             );
         } else {
-            $prefix = $isProbeFailure ? 'pre-connect probe failed' : 'connection lost';
-            $this->logger->warning("Feedple: {$prefix}: {$e->getMessage()}, reconnecting in {$delay}s");
+            $isRejected = $this->isServerRejection($e);
+            if ($isRejected) {
+                $this->logger->warning(
+                    "Feedple: connection lost: server rejected connection: {$msg}, reconnecting in {$delay}s"
+                );
+            } else {
+                $prefix = $isProbeFailure ? 'pre-connect probe failed' : 'connection lost';
+                $this->logger->warning("Feedple: {$prefix}: {$msg}, reconnecting in {$delay}s");
+            }
         }
 
         if ($this->maxRetries !== null && $this->retryCount >= $this->maxRetries) {
@@ -626,6 +635,9 @@ class FeedpleWebSocket
         // Extract status code from the HTTP response line
         if (preg_match('/HTTP\/[\d.]+ (\d{3})/', $statusLine, $m)) {
             $code = (int) $m[1];
+            if ($code === 429) {
+                throw new \RuntimeException("HTTP probe failed with 429 Too Many Requests: Rate exceeded");
+            }
             // Status codes 2xx, 3xx, 400, 404, 405, 426 indicate the server port is UP and listening
             if ($code >= 500) {
                 throw new \RuntimeException("HTTP probe failed with server error {$code}: {$body}");
@@ -637,7 +649,7 @@ class FeedpleWebSocket
 
     /**
      * Heuristically determine whether a Throwable represents a server
-     * rejection (e.g. HTTP 403).
+     * rejection (e.g. HTTP 403, 401, 429).
      *
      * Mirrors the detection logic in Python's except block inside connect():
      *   status = getattr(e, "status_code", None)
@@ -646,7 +658,7 @@ class FeedpleWebSocket
     private function isServerRejection(\Throwable $e): bool
     {
         $msg = $e->getMessage();
-        if (str_contains($msg, '403') || str_contains($msg, '401')) {
+        if (str_contains($msg, '403') || str_contains($msg, '401') || str_contains($msg, '429') || str_contains($msg, 'Rate exceeded')) {
             return true;
         }
         // Some WebSocket libraries expose a getCode() or statusCode property
