@@ -275,16 +275,19 @@ class SchemaServices
         while ($row = $fkStmt->fetch(\PDO::FETCH_ASSOC)) {
             $t = $row['table_name'] ?? $row['TABLE_NAME'];
             if (!isset($allowedMap[$t])) continue;
-            $name = $row['constraint_name'];
+            $name = $row['constraint_name'] ?? $row['CONSTRAINT_NAME'] ?? 'fk';
+            $refTable = $row['referenced_table_name'] ?? $row['REFERENCED_TABLE_NAME'] ?? '';
+            $colName = $row['column_name'] ?? $row['COLUMN_NAME'] ?? '';
+            $refColName = $row['referenced_column_name'] ?? $row['REFERENCED_COLUMN_NAME'] ?? '';
             if (!isset($fkRawMap[$t][$name])) {
                 $fkRawMap[$t][$name] = [
                     'columns'            => [],
-                    'references_table'   => $row['referenced_table_name'],
+                    'references_table'   => $refTable,
                     'references_columns' => [],
                 ];
             }
-            $fkRawMap[$t][$name]['columns'][]            = $row['column_name'];
-            $fkRawMap[$t][$name]['references_columns'][] = $row['referenced_column_name'];
+            $fkRawMap[$t][$name]['columns'][]            = $colName;
+            $fkRawMap[$t][$name]['references_columns'][] = $refColName;
         }
         $fkMap = [];
         foreach ($fkRawMap as $t => $constraints) {
