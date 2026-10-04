@@ -115,6 +115,9 @@ class FeedpleSDK
     private $probeBeforeConnect;
     /** @var LoggerInterface|null */
     private $logger;
+    /** @var resource|null Lock file resource kept open for the lifetime of the worker process */
+    private static $workerLockHandle = null;
+
     /** @var bool */
     private $isWorkerProcess;
 
@@ -200,6 +203,12 @@ class FeedpleSDK
         }
 
         if ($isWorkerProcess) {
+            if (!$this->acquireWorkerLock()) {
+                $this->log('warning', 'Feedple: another background worker process is already running; exiting duplicate worker process.');
+                fwrite(STDERR, "Feedple worker: duplicate worker instance detected. Exiting.\n");
+                exit(0);
+            }
+
             // We're inside the spawned background process already — set up
             // the WebSocket client and event loop here instead of spawning
             // another one.
@@ -224,12 +233,28 @@ class FeedpleSDK
     }
 
     /**
-     * Checks whether a worker process from a previous run is still alive,
-     * using the pid file. Uses cross-platform techniques (no posix
-     * extension) so this works on Windows too.
+     * Checks whether a worker process from a previous run is still alive.
+     * Uses kernel-level file locking (flock) backed by PID checks.
      */
     private function isWorkerAlreadyRunning(): bool
     {
+        $lockFile = $this->lockFilePath();
+        if (is_file($lockFile)) {
+            $fp = @fopen($lockFile, 'c+');
+            if ($fp) {
+                $gotLock = flock($fp, LOCK_EX | LOCK_NB);
+                if ($gotLock) {
+                    // Lock was available -> no active worker holds the lock!
+                    flock($fp, LOCK_UN);
+                    fclose($fp);
+                } else {
+                    // Lock is actively held by a running worker process!
+                    fclose($fp);
+                    return true;
+                }
+            }
+        }
+
         $pidFile = $this->pidFilePath();
         if (!is_file($pidFile)) {
             return false;
@@ -252,6 +277,32 @@ class FeedpleSDK
         $exitCode = 1;
         exec(sprintf('kill -0 %d 2>/dev/null', $pid), $dummy, $exitCode);
         return $exitCode === 0;
+    }
+
+    /**
+     * Attempt to acquire an exclusive lock file handle for this worker process.
+     * Returns true if lock was acquired, false if another worker is running.
+     */
+    private function acquireWorkerLock(): bool
+    {
+        $lockFile = $this->lockFilePath();
+        $fp = @fopen($lockFile, 'c+');
+        if (!$fp) {
+            return false;
+        }
+
+        if (!flock($fp, LOCK_EX | LOCK_NB)) {
+            fclose($fp);
+            return false;
+        }
+
+        @ftruncate($fp, 0);
+        @rewind($fp);
+        @fwrite($fp, (string) getmypid());
+        @fflush($fp);
+
+        self::$workerLockHandle = $fp;
+        return true;
     }
 
     /**
@@ -584,6 +635,12 @@ class FeedpleSDK
         }
 
         @unlink($pidFile);
+        @unlink($this->lockFilePath());
+        if (self::$workerLockHandle !== null && is_resource(self::$workerLockHandle)) {
+            @flock(self::$workerLockHandle, LOCK_UN);
+            @fclose(self::$workerLockHandle);
+            self::$workerLockHandle = null;
+        }
         $this->workerPid = null;
 
         $this->log('info', 'Feedple: SDK stopped');
@@ -701,6 +758,11 @@ class FeedpleSDK
     private function pidFilePath(): string
     {
         return $this->runtimeDir . DIRECTORY_SEPARATOR . 'feedple-sdk.pid';
+    }
+
+    private function lockFilePath(): string
+    {
+        return $this->runtimeDir . DIRECTORY_SEPARATOR . 'feedple-sdk.lock';
     }
 
     private function buildLogger(): LoggerInterface

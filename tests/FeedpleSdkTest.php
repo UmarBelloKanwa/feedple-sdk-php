@@ -107,6 +107,36 @@ class FeedpleSdkTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function testWorkerSingleInstanceLockDetectsRunningWorker(): void
+    {
+        $this->checkSqliteAvailable();
+
+        $tempDir = sys_get_temp_dir();
+        $lockFile = $tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.lock';
+
+        // Simulate an active worker holding flock
+        $fp = fopen($lockFile, 'c+');
+        $this->assertNotFalse($fp);
+        $gotLock = flock($fp, LOCK_EX | LOCK_NB);
+        $this->assertTrue($gotLock);
+
+        $sdk = new FeedpleSDK(
+            apiKey:     'test_api_key',
+            dbConfig:   DbConfig::sqlite(':memory:'),
+            identity:   new Identity(name: 'admin', allTables: true),
+            runtimeDir: $tempDir,
+        );
+
+        // SDK constructor sees active lock file and skips spawning worker
+        $this->addToAssertionCount(1);
+
+        flock($fp, LOCK_UN);
+        fclose($fp);
+        @unlink($lockFile);
+
+        $sdk->stop();
+    }
+
     // ── buildCompiler ──────────────────────────────────────────────────────
 
     public function testBuildCompilerReturnsInstance(): void
