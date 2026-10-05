@@ -10,6 +10,7 @@ use Ratchet\Client\WebSocket;
 use Ratchet\Client\Connector;
 use React\EventLoop\LoopInterface;
 use React\EventLoop\Loop;
+use React\EventLoop\TimerInterface;
 use React\Promise\Deferred;
 
 /**
@@ -51,6 +52,9 @@ class FeedpleWebSocket
 
     /** @var int  Current retry count (reset on successful connect) */
     private $retryCount = 0;
+
+    /** @var float  Timestamp of the last received message or pong */
+    private float $lastActivity = 0.0;
 
     // ── Deferred auth resolution (replaces asyncio.Event) ──────────────────
     /** @var Deferred|null  Resolved when auth.ack is received */
@@ -186,43 +190,64 @@ class FeedpleWebSocket
         $connector($this->wsUrl)->then(
             function (WebSocket $conn) use ($delay): void {
                 // Successful connection — reset state
-                $this->ws          = $conn;
-                $this->retryCount  = 0;
+                $this->ws            = $conn;
+                $this->retryCount    = 0;
                 $this->authenticated = false;
-                $this->authDeferred = new Deferred();
-                $currentDelay      = $this->reconnectDelay; // reset for next reconnect
+                $this->authDeferred  = new Deferred();
+                $this->lastActivity  = microtime(true);
+                $currentDelay        = $this->reconnectDelay; // reset for next reconnect
 
                 $this->logger->info("Feedple: connection established");
+
+                // Start 5-second timeout for server auth.ack response
+                $authTimeoutTimer = $this->loop->addTimer(5.0, function () use ($conn, $currentDelay): void {
+                    if (!$this->authenticated && $this->ws === $conn) {
+                        $this->logger->warning("Feedple: auth handshake timed out (5s), reconnecting in {$currentDelay}s");
+                        $conn->close();
+                    }
+                });
 
                 // Authenticate immediately
                 try {
                     $this->authenticate();
                 } catch (\Throwable $e) {
+                    $this->loop->cancelTimer($authTimeoutTimer);
                     $this->logger->warning("Feedple: auth request failed: {$e->getMessage()}, reconnecting in {$currentDelay}s");
                     $conn->close();
                     $this->handleConnectFailure($e, $currentDelay);
                     return;
                 }
 
-                // Start heartbeat timer
-                $heartbeatTimer = $this->loop->addPeriodicTimer(self::PING_INTERVAL, function () {
-                    if ($this->ws !== null) {
+                // Start heartbeat timer with silent connection detector
+                $heartbeatTimer = $this->loop->addPeriodicTimer(self::PING_INTERVAL, function () use ($conn): void {
+                    if ($this->ws === $conn) {
+                        $silentSeconds = microtime(true) - $this->lastActivity;
+                        if ($silentSeconds > (self::PING_INTERVAL + self::PONG_TIMEOUT)) {
+                            $this->logger->warning(
+                                sprintf("Feedple: connection silent for %.1fs (ping timeout), reconnecting...", $silentSeconds)
+                            );
+                            $conn->close();
+                            return;
+                        }
+
                         try {
                             $this->send($this->makeMessage('ping', []));
                         } catch (\Throwable) {
-                            // Connection may be dead; the onClose handler will trigger reconnect
+                            // Connection dropped; onClose will trigger reconnect
                         }
                     }
                 });
 
                 // Handle incoming messages
-                $conn->on('message', function (\Ratchet\RFC6455\Messaging\MessageInterface $msg) {
-                    $this->handleMessage((string) $msg);
+                $conn->on('message', function (\Ratchet\RFC6455\Messaging\MessageInterface $msg) use ($authTimeoutTimer): void {
+                    $this->lastActivity = microtime(true);
+                    $this->handleMessage((string) $msg, $authTimeoutTimer);
                 });
 
                 // Handle close
-                $conn->on('close', function ($code = null, $reason = null) use ($currentDelay, $heartbeatTimer): void {
+                $conn->on('close', function ($code = null, $reason = null) use ($currentDelay, $heartbeatTimer, $authTimeoutTimer): void {
                     $this->loop->cancelTimer($heartbeatTimer);
+                    $this->loop->cancelTimer($authTimeoutTimer);
                     $this->ws            = null;
                     $this->authenticated = false;
                     $this->authDeferred  = null;
@@ -237,8 +262,9 @@ class FeedpleWebSocket
                     $this->scheduleReconnect($currentDelay);
                 });
 
-                $conn->on('error', function (\Throwable $e) use ($currentDelay, $heartbeatTimer): void {
+                $conn->on('error', function (\Throwable $e) use ($currentDelay, $heartbeatTimer, $authTimeoutTimer): void {
                     $this->loop->cancelTimer($heartbeatTimer);
+                    $this->loop->cancelTimer($authTimeoutTimer);
                     $this->ws            = null;
                     $this->authenticated = false;
                     $this->authDeferred  = null;
@@ -282,7 +308,7 @@ class FeedpleWebSocket
      *
      * Mirrors: async def _listen(self) and the message-type dispatch therein.
      */
-    private function handleMessage(string $raw): void
+    private function handleMessage(string $raw, ?TimerInterface $authTimeoutTimer = null): void
     {
         try {
             $message = JsonSerializer::decode($raw);
@@ -295,6 +321,9 @@ class FeedpleWebSocket
 
         switch ($type) {
             case 'auth.ack':
+                 if ($authTimeoutTimer !== null) {
+                     $this->loop->cancelTimer($authTimeoutTimer);
+                 }
                  $this->sessionId     = $message['payload']['session_id'] ?? null;
                  $this->authenticated = true;
                  $this->logger->info("Feedple: session authenticated (session: {$this->sessionId})");
@@ -310,6 +339,9 @@ class FeedpleWebSocket
                  break;
 
             case 'auth.error':
+                if ($authTimeoutTimer !== null) {
+                    $this->loop->cancelTimer($authTimeoutTimer);
+                }
                 $reason = $message['payload']['reason'] ?? 'unknown';
                 $this->logger->error("Feedple: auth failed: {$reason}");
                 $this->authDeferred?->reject(new AuthException("Auth failed: {$reason}"));
