@@ -33,7 +33,7 @@ class FeedpleWebSocket
 {
     // ── Timing constants (mirrors websocket.py) ─────────────────────────────
     public const PING_INTERVAL       = 10;   // seconds
-    public const PONG_TIMEOUT        = 10;   // seconds
+    public const PONG_TIMEOUT        = 30;   // seconds (allow ample tolerance for synchronous DB operations)
     public const RECONNECT_DELAY     = 1;    // seconds
     public const MAX_RECONNECT_DELAY = 1;   // seconds
 
@@ -55,6 +55,12 @@ class FeedpleWebSocket
 
     /** @var float  Timestamp of the last received message or pong */
     private float $lastActivity = 0.0;
+
+    /** @var TimerInterface|null Active reconnect timer preventing duplicate reconnect loops */
+    private ?TimerInterface $reconnectTimer = null;
+
+    /** @var bool True if a connection handshake is currently in progress */
+    private bool $isConnecting = false;
 
     // ── Deferred auth resolution (replaces asyncio.Event) ──────────────────
     /** @var Deferred|null  Resolved when auth.ack is received */
@@ -165,30 +171,63 @@ class FeedpleWebSocket
         $this->attemptConnect($this->reconnectDelay);
     }
 
+    /** @var Connector|null Reusable Ratchet connector to avoid leaking stream descriptors */
+    private ?Connector $connector = null;
+
     /**
      * One iteration of the connect-authenticate-listen cycle.
      * On failure, schedules a reconnect after the current back-off delay.
      */
     private function attemptConnect(float $delay): void
     {
-        if ($this->stopRequested) {
+        if ($this->stopRequested || $this->isConnecting) {
             return;
         }
+
+        // Cancel any pending reconnect timer
+        if ($this->reconnectTimer !== null) {
+            $this->loop->cancelTimer($this->reconnectTimer);
+            $this->reconnectTimer = null;
+        }
+
+        $this->isConnecting = true;
 
         // Optional HTTP probe before WebSocket handshake (mirrors probe_before_connect)
         if ($this->probeBeforeConnect) {
             try {
                 $this->httpProbe();
             } catch (\Throwable $e) {
+                $this->isConnecting = false;
                 $this->logger->warning("Feedple: pre-connect probe failed: {$e->getMessage()}");
                 $this->handleConnectFailure($e, $delay, isProbeFailure: true);
                 return;
             }
         }
 
-        $connector = new Connector($this->loop);
+        $this->connector ??= new Connector($this->loop);
+        $connector = $this->connector;
+
+        $connected = false;
+        // Enforce 10s timeout on the connection promise so silent network drops never hang indefinitely
+        $connectTimeoutTimer = $this->loop->addTimer(10.0, function () use (&$connected, $delay): void {
+            if (!$connected) {
+                $connected = true;
+                $this->isConnecting = false;
+                $this->logger->warning("Feedple: connection attempt timed out (10s), reconnecting...");
+                $this->handleConnectFailure(new \RuntimeException("Connection attempt timed out after 10s"), $delay);
+            }
+        });
+
         $connector($this->wsUrl)->then(
-            function (WebSocket $conn) use ($delay): void {
+            function (WebSocket $conn) use ($delay, &$connected, $connectTimeoutTimer): void {
+                if ($connected) {
+                    $conn->close();
+                    return;
+                }
+                $connected = true;
+                $this->isConnecting = false;
+                $this->loop->cancelTimer($connectTimeoutTimer);
+
                 // Successful connection — reset state
                 $this->ws            = $conn;
                 $this->retryCount    = 0;
@@ -244,11 +283,26 @@ class FeedpleWebSocket
                     $this->handleMessage((string) $msg, $authTimeoutTimer);
                 });
 
-                // Handle close
-                $conn->on('close', function ($code = null, $reason = null) use ($currentDelay, $heartbeatTimer, $authTimeoutTimer): void {
+                // Unified connection cleanup preventing duplicate reconnect timers on simultaneous error + close
+                $connectionEnded = false;
+                $cleanupAndReconnect = function (string $source, ?\Throwable $err, ?int $code) use (
+                    &$connectionEnded,
+                    $conn,
+                    $currentDelay,
+                    $heartbeatTimer,
+                    $authTimeoutTimer
+                ): void {
+                    if ($connectionEnded) {
+                        return;
+                    }
+                    $connectionEnded = true;
+
                     $this->loop->cancelTimer($heartbeatTimer);
                     $this->loop->cancelTimer($authTimeoutTimer);
-                    $this->ws            = null;
+
+                    if ($this->ws === $conn) {
+                        $this->ws = null;
+                    }
                     $this->authenticated = false;
                     $this->authDeferred  = null;
 
@@ -256,22 +310,34 @@ class FeedpleWebSocket
                         return;
                     }
 
-                    $this->logger->warning(
-                        "Feedple: connection closed (code={$code}), reconnecting in {$currentDelay}s"
-                    );
-                    $this->scheduleReconnect($currentDelay);
+                    if ($err !== null) {
+                        $this->handleConnectFailure($err, $currentDelay);
+                    } else {
+                        $this->logger->warning(
+                            "Feedple: connection closed (code={$code}), reconnecting in {$currentDelay}s"
+                        );
+                        $this->scheduleReconnect($currentDelay);
+                    }
+                };
+
+                // Handle close
+                $conn->on('close', function ($code = null, $reason = null) use ($cleanupAndReconnect): void {
+                    $cleanupAndReconnect('close', null, is_int($code) ? $code : null);
                 });
 
-                $conn->on('error', function (\Throwable $e) use ($currentDelay, $heartbeatTimer, $authTimeoutTimer): void {
-                    $this->loop->cancelTimer($heartbeatTimer);
-                    $this->loop->cancelTimer($authTimeoutTimer);
-                    $this->ws            = null;
-                    $this->authenticated = false;
-                    $this->authDeferred  = null;
-                    $this->handleConnectFailure($e, $currentDelay);
+                // Handle error
+                $conn->on('error', function (\Throwable $e) use ($cleanupAndReconnect): void {
+                    $cleanupAndReconnect('error', $e, null);
                 });
             },
-            function (\Throwable $e) use ($delay): void {
+            function (\Throwable $e) use ($delay, &$connected, $connectTimeoutTimer): void {
+                if ($connected) {
+                    return;
+                }
+                $connected = true;
+                $this->isConnecting = false;
+                $this->loop->cancelTimer($connectTimeoutTimer);
+
                 $this->ws            = null;
                 $this->authenticated = false;
                 $this->authDeferred  = null;
@@ -346,9 +412,11 @@ class FeedpleWebSocket
                 $this->logger->error("Feedple: auth failed: {$reason}");
                 $this->authDeferred?->reject(new AuthException("Auth failed: {$reason}"));
                 $reasonLower = strtolower($reason);
-                if (str_contains($reasonLower, 'invalid api key') || str_contains($reasonLower, 'unauthorized')) {
+                if (str_contains($reasonLower, 'forbidden') || str_contains($reasonLower, 'account disabled') || str_contains($reasonLower, 'suspended')) {
                     $this->stopRequested = true;
                 }
+                // Clear session ID on auth rejection so next reconnect negotiates a fresh session
+                $this->sessionId = null;
                 $this->ws?->close();
                 break;
 
@@ -571,6 +639,11 @@ class FeedpleWebSocket
     public function stop(): void
     {
         $this->stopRequested = true;
+        if ($this->reconnectTimer !== null) {
+            $this->loop->cancelTimer($this->reconnectTimer);
+            $this->reconnectTimer = null;
+        }
+        $this->isConnecting = false;
         $this->ws?->close();
     }
 
@@ -626,9 +699,16 @@ class FeedpleWebSocket
             return;
         }
 
+        // Cancel any pending reconnect timer so we never stack multiple attempts
+        if ($this->reconnectTimer !== null) {
+            $this->loop->cancelTimer($this->reconnectTimer);
+            $this->reconnectTimer = null;
+        }
+
         $nextDelay = min($delay * 2, self::MAX_RECONNECT_DELAY);
 
-        $this->loop->addTimer($delay, function () use ($nextDelay): void {
+        $this->reconnectTimer = $this->loop->addTimer($delay, function () use ($nextDelay): void {
+            $this->reconnectTimer = null;
             $this->attemptConnect($nextDelay);
         });
     }

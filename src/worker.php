@@ -39,6 +39,10 @@ require $config['autoload_path'];
 
 use Feedple\Sdk\FeedpleSDK;
 
+if (function_exists('pcntl_signal')) {
+    @pcntl_signal(SIGHUP, SIG_IGN);
+}
+
 try {
     FeedpleSDK::runWorker($controlFilePath);
 } catch (\Throwable $e) {

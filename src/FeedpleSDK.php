@@ -305,6 +305,15 @@ class FeedpleSDK
         return true;
     }
 
+    public static function getWsUrl(): string
+    {
+        $override = getenv('FEEDPLE_WS_URL') ?: ($_ENV['FEEDPLE_WS_URL'] ?? null);
+        if (!empty($override)) {
+            return (string) $override;
+        }
+        return FEEDPLE_WS_URL;
+    }
+
     /**
      * Build the WebSocket client + event loop. Only ever called inside the
      * worker process (isWorkerProcess = true).
@@ -314,7 +323,7 @@ class FeedpleSDK
         $this->loop = Loop::get();
 
         $this->ws = new FeedpleWebSocket(
-            FEEDPLE_WS_URL,
+            self::getWsUrl(),
             $this->apiKey,
             $this->loop,
             $this->buildLogger()
@@ -571,10 +580,24 @@ class FeedpleSDK
         }
     }
 
+    /**
+     * Get active database connection, automatically reconnecting if connection was lost.
+     */
+    private function getDb(): \PDO
+    {
+        try {
+            $this->db->query('SELECT 1');
+        } catch (\Throwable) {
+            $this->log('info', 'Feedple: database connection lost or timed out, reconnecting...');
+            $this->db = $this->dbConfig->toPdo();
+        }
+        return $this->db;
+    }
+
     private function doSyncSchema(): void
     {
         try {
-            $schema = SchemaServices::getSchema($this->db, $this->identity);
+            $schema = SchemaServices::getSchema($this->getDb(), $this->identity);
 
             $this->log('info', sprintf('Feedple: schema inspected (%d tables found)', count($schema)));
 
@@ -676,7 +699,7 @@ class FeedpleSDK
         $this->log('info', 'Feedple: executing query against database...');
         $start = microtime(true);
 
-        $stmt = $this->db->prepare($sql);
+        $stmt = $this->getDb()->prepare($sql);
         foreach ($params as $index => $value) {
             $paramIndex = $index + 1;
             if (is_int($value)) {
