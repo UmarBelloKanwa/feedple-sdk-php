@@ -367,6 +367,7 @@ class FeedpleSDK
             'max_retries'          => $this->maxRetries,
             'probe_before_connect' => $this->probeBeforeConnect,
             'log_path'             => $logFile,
+            'runtime_dir'          => $this->runtimeDir,
         ];
 
         // Control file contains DB credentials in plaintext JSON — it's
@@ -478,7 +479,7 @@ class FeedpleSDK
             $config['max_retries'],
             $config['probe_before_connect'],
             null,
-            null,
+            $config['runtime_dir'] ?? null,
             true
         );
 
@@ -655,7 +656,15 @@ class FeedpleSDK
 
         if ($this->isWorkerProcess) {
             // Called from inside the worker itself (e.g. a signal handler).
+            $this->ws?->stop();
             $this->loop?->stop();
+            @unlink($this->pidFilePath());
+            @unlink($this->lockFilePath());
+            if (self::$workerLockHandle !== null && is_resource(self::$workerLockHandle)) {
+                @flock(self::$workerLockHandle, LOCK_UN);
+                @fclose(self::$workerLockHandle);
+                self::$workerLockHandle = null;
+            }
             $this->log('info', 'Feedple: SDK stopped');
             return;
         }

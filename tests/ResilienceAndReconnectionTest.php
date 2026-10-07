@@ -220,5 +220,39 @@ class ResilienceAndReconnectionTest extends TestCase
             @rmdir($tempDir);
         }
     }
+
+    public function testWorkerProcessStopCleanup(): void
+    {
+        $tempDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'feedple_worker_stop_' . bin2hex(random_bytes(4));
+        @mkdir($tempDir, 0777, true);
+
+        try {
+            $sdk = new FeedpleSDK(
+                apiKey: 'test_key',
+                dbConfig: DbConfig::sqlite(':memory:'),
+                identity: new Identity(name: 'admin', allTables: true),
+                runtimeDir: $tempDir,
+                isWorkerProcess: true
+            );
+
+            $lockPath = $tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.lock';
+            $pidPath  = $tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.pid';
+            file_put_contents($pidPath, (string) getmypid());
+
+            $this->assertFileExists($lockPath, 'Lock file must exist for worker process');
+            $this->assertFileExists($pidPath, 'PID file should exist');
+
+            // stop() inside worker process must unlink lock and pid
+            $sdk->stop();
+
+            $this->assertFileDoesNotExist($lockPath, 'Lock file must be unlinked after stop()');
+            $this->assertFileDoesNotExist($pidPath, 'PID file must be unlinked after stop()');
+        } finally {
+            @unlink($tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.lock');
+            @unlink($tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.pid');
+            @unlink($tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.log');
+            @rmdir($tempDir);
+        }
+    }
 }
 
