@@ -456,6 +456,12 @@ class FeedpleSDK
      */
     public static function runWorker(string $controlFilePath)
     {
+        @ini_set('max_execution_time', '0');
+        @ini_set('memory_limit', '512M');
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+
         $config = json_decode((string) file_get_contents($controlFilePath), true, 512, JSON_THROW_ON_ERROR);
 
         $identity = unserialize(base64_decode($config['identity']));
@@ -493,6 +499,12 @@ class FeedpleSDK
      */
     public function run(): void
     {
+        @ini_set('max_execution_time', '0');
+        @ini_set('memory_limit', '512M');
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+
         $this->log('info', 'Feedple: starting background sync worker...');
 
         $this->ws->connect();
@@ -553,6 +565,11 @@ class FeedpleSDK
             $this->syncSchema();
         } catch (\Throwable $e) {
             $this->log('warning', "Feedple: schema sync failed: {$e->getMessage()}");
+        }
+
+        // Run garbage collection after sync cycle to reclaim memory
+        if (function_exists('gc_collect_cycles')) {
+            @gc_collect_cycles();
         }
 
         $this->log('info', "Feedple: next sync in {$this->syncInterval}s");
@@ -767,7 +784,12 @@ class FeedpleSDK
         $line = sprintf("[%s] %s: %s%s", date('Y-m-d H:i:s'), strtoupper($level), $message, PHP_EOL);
 
         try {
-            file_put_contents($this->defaultLogPath(), $line, FILE_APPEND | LOCK_EX);
+            $logPath = $this->defaultLogPath();
+            // Rotate log if larger than 10MB to prevent memory exhaustion and disk fill
+            if (is_file($logPath) && @filesize($logPath) > 10 * 1024 * 1024) {
+                @rename($logPath, $logPath . '.1');
+            }
+            file_put_contents($logPath, $line, FILE_APPEND | LOCK_EX);
         } catch (\Throwable $e) {
             // logging must never take down the caller or the worker
         }

@@ -16,22 +16,67 @@ declare(strict_types=1);
  * and run indefinitely.
  */
 
+// Execution & Memory Safety (CLI 24/7 continuous operation)
+@ini_set('max_execution_time', '0');
+@ini_set('memory_limit', '512M');
+if (function_exists('set_time_limit')) {
+    @set_time_limit(0);
+}
+
+// Ignore SIGHUP so closing the terminal / session doesn't kill the worker
+if (function_exists('pcntl_signal')) {
+    @pcntl_signal(SIGHUP, SIG_IGN);
+}
+
 $controlFilePath = $argv[1] ?? null;
+$config = null;
+$logFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'feedple-sdk.log';
+
+// Global Fatal Crash Trap: Catches fatal errors, OOM, and execution timeouts
+register_shutdown_function(function () use (&$config, &$logFile): void {
+    $error = error_get_last();
+    if ($error !== null && in_array($error['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+        $targetLog = (is_array($config) && !empty($config['runtime_dir']))
+            ? $config['runtime_dir'] . DIRECTORY_SEPARATOR . 'feedple-sdk.log'
+            : $logFile;
+
+        $entry = sprintf(
+            "[%s] CRITICAL: Feedple worker fatal crash: %s in %s on line %d\n",
+            date('Y-m-d H:i:s'),
+            $error['message'],
+            $error['file'],
+            $error['line']
+        );
+        @file_put_contents($targetLog, $entry, FILE_APPEND | LOCK_EX);
+        fwrite(STDERR, $entry);
+    }
+});
 
 if ($controlFilePath === null || !is_file($controlFilePath)) {
-    fwrite(STDERR, "Feedple worker: missing or invalid control file path\n");
+    $msg = "Feedple worker: missing or invalid control file path\n";
+    @file_put_contents($logFile, "[" . date('Y-m-d H:i:s') . "] ERROR: " . $msg, FILE_APPEND | LOCK_EX);
+    fwrite(STDERR, $msg);
     exit(1);
 }
 
-$config = json_decode((string) file_get_contents($controlFilePath), true);
+$rawConfig = (string) file_get_contents($controlFilePath);
+$config = json_decode($rawConfig, true);
 
 if (!is_array($config) || !isset($config['autoload_path'])) {
-    fwrite(STDERR, "Feedple worker: control file is malformed\n");
+    $msg = "Feedple worker: control file is malformed\n";
+    @file_put_contents($logFile, "[" . date('Y-m-d H:i:s') . "] ERROR: " . $msg, FILE_APPEND | LOCK_EX);
+    fwrite(STDERR, $msg);
     exit(1);
+}
+
+if (!empty($config['runtime_dir'])) {
+    $logFile = $config['runtime_dir'] . DIRECTORY_SEPARATOR . 'feedple-sdk.log';
 }
 
 if (!is_file($config['autoload_path'])) {
-    fwrite(STDERR, "Feedple worker: autoload path '{$config['autoload_path']}' not found\n");
+    $msg = "Feedple worker: autoload path '{$config['autoload_path']}' not found\n";
+    @file_put_contents($logFile, "[" . date('Y-m-d H:i:s') . "] ERROR: " . $msg, FILE_APPEND | LOCK_EX);
+    fwrite(STDERR, $msg);
     exit(1);
 }
 
@@ -39,13 +84,16 @@ require $config['autoload_path'];
 
 use Feedple\Sdk\FeedpleSDK;
 
-if (function_exists('pcntl_signal')) {
-    @pcntl_signal(SIGHUP, SIG_IGN);
-}
-
 try {
     FeedpleSDK::runWorker($controlFilePath);
 } catch (\Throwable $e) {
-    fwrite(STDERR, 'Feedple worker crashed: ' . $e->getMessage() . "\n" . $e->getTraceAsString() . "\n");
+    $entry = sprintf(
+        "[%s] CRITICAL: Feedple worker uncaught exception: %s\n%s\n",
+        date('Y-m-d H:i:s'),
+        $e->getMessage(),
+        $e->getTraceAsString()
+    );
+    @file_put_contents($logFile, $entry, FILE_APPEND | LOCK_EX);
+    fwrite(STDERR, $entry);
     exit(1);
 }

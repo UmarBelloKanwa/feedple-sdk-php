@@ -157,4 +157,68 @@ class ResilienceAndReconnectionTest extends TestCase
             @unlink($tempDb);
         }
     }
+
+    public function testLoopGuardianIsInitializedAndCancelledOnStop(): void
+    {
+        $loop = Loop::get();
+        $ws = new FeedpleWebSocket(
+            'ws://localhost:12345/ws',
+            'test_key',
+            $loop,
+            new NullLogger()
+        );
+
+        $guardianProp = new \ReflectionProperty(FeedpleWebSocket::class, 'guardianTimer');
+        $guardianProp->setAccessible(true);
+        $this->assertNull($guardianProp->getValue($ws), 'Guardian timer should be null before connect()');
+
+        $ensureMethod = new \ReflectionMethod(FeedpleWebSocket::class, 'ensureLoopGuardian');
+        $ensureMethod->setAccessible(true);
+        $ensureMethod->invoke($ws);
+
+        $this->assertNotNull($guardianProp->getValue($ws), 'Guardian timer should be initialized');
+
+        $ws->stop();
+        $this->assertNull($guardianProp->getValue($ws), 'Guardian timer must be null after stop()');
+    }
+
+    public function testLogRotationWhenExceeding10MB(): void
+    {
+        $this->checkSqliteAvailable();
+
+        $tempDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'feedple_test_' . uniqid();
+        @mkdir($tempDir, 0777, true);
+
+        try {
+            $sdk = new FeedpleSDK(
+                apiKey: 'test_key',
+                dbConfig: DbConfig::sqlite(':memory:'),
+                identity: new Identity(name: 'admin', allTables: true),
+                runtimeDir: $tempDir,
+            );
+
+            $logPath = $tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.log';
+            $rotatedPath = $logPath . '.1';
+
+            // Create a fake 11MB file
+            $fp = fopen($logPath, 'wb');
+            fseek($fp, 11 * 1024 * 1024, SEEK_SET);
+            fwrite($fp, "\n");
+            fclose($fp);
+
+            $this->assertGreaterThan(10 * 1024 * 1024, filesize($logPath));
+
+            // Calling log() must rotate the file
+            $sdk->log('info', 'Rotation test entry');
+
+            $this->assertFileExists($rotatedPath, 'Rotated log file .1 must exist');
+            $this->assertFileExists($logPath, 'New log file must exist');
+            $this->assertLessThan(1024, filesize($logPath), 'New log file should only contain the new line');
+        } finally {
+            @unlink($tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.log');
+            @unlink($tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.log.1');
+            @rmdir($tempDir);
+        }
+    }
 }
+

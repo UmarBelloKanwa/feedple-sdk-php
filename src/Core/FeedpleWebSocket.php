@@ -62,6 +62,9 @@ class FeedpleWebSocket
     /** @var bool True if a connection handshake is currently in progress */
     private bool $isConnecting = false;
 
+    /** @var TimerInterface|null Loop guardian periodic timer keeping event loop alive */
+    private ?TimerInterface $guardianTimer = null;
+
     // ── Deferred auth resolution (replaces asyncio.Event) ──────────────────
     /** @var Deferred|null  Resolved when auth.ack is received */
     private $authDeferred = null;
@@ -168,7 +171,21 @@ class FeedpleWebSocket
      */
     public function connect(): void
     {
+        $this->ensureLoopGuardian();
         $this->attemptConnect($this->reconnectDelay);
+    }
+
+    /**
+     * Loop Guardian: Ensures the ReactPHP event loop never runs out of active timers,
+     * preventing silent process termination (exit 0) when sockets close or reconnect.
+     */
+    private function ensureLoopGuardian(): void
+    {
+        if ($this->guardianTimer === null) {
+            $this->guardianTimer = $this->loop->addPeriodicTimer(30.0, function (): void {
+                // Heartbeat to keep event loop alive 24/7
+            });
+        }
     }
 
     /** @var Connector|null Reusable Ratchet connector to avoid leaking stream descriptors */
@@ -642,6 +659,10 @@ class FeedpleWebSocket
         if ($this->reconnectTimer !== null) {
             $this->loop->cancelTimer($this->reconnectTimer);
             $this->reconnectTimer = null;
+        }
+        if ($this->guardianTimer !== null) {
+            $this->loop->cancelTimer($this->guardianTimer);
+            $this->guardianTimer = null;
         }
         $this->isConnecting = false;
         $this->ws?->close();
