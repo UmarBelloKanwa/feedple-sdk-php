@@ -720,26 +720,38 @@ class FeedpleSDK
 
         $this->log('info', 'Feedple: executing IR request...');
 
-        ['sql' => $sql, 'params' => $params] = IrBuilder::buildQueryFromIr($ir);
+        $driver = null;
+        try {
+            $driver = (string) $this->getDb()->getAttribute(\PDO::ATTR_DRIVER_NAME);
+        } catch (\Throwable) {
+            // Driver name couldn't be detected
+        }
 
-        $this->log('info', 'Feedple: executing query against database...');
+        ['sql' => $sql, 'params' => $params] = IrBuilder::buildQueryFromIr($ir, $driver);
+
+        $this->log('info', "Feedple: executing query against database: {$sql}");
         $start = microtime(true);
 
-        $stmt = $this->getDb()->prepare($sql);
-        foreach ($params as $index => $value) {
-            $paramIndex = $index + 1;
-            if (is_int($value)) {
-                $stmt->bindValue($paramIndex, $value, \PDO::PARAM_INT);
-            } elseif (is_bool($value)) {
-                $stmt->bindValue($paramIndex, $value, \PDO::PARAM_BOOL);
-            } elseif (is_null($value)) {
-                $stmt->bindValue($paramIndex, $value, \PDO::PARAM_NULL);
-            } else {
-                $stmt->bindValue($paramIndex, $value, \PDO::PARAM_STR);
+        try {
+            $stmt = $this->getDb()->prepare($sql);
+            foreach ($params as $index => $value) {
+                $paramIndex = $index + 1;
+                if (is_int($value)) {
+                    $stmt->bindValue($paramIndex, $value, \PDO::PARAM_INT);
+                } elseif (is_bool($value)) {
+                    $stmt->bindValue($paramIndex, $value, \PDO::PARAM_BOOL);
+                } elseif (is_null($value)) {
+                    $stmt->bindValue($paramIndex, $value, \PDO::PARAM_NULL);
+                } else {
+                    $stmt->bindValue($paramIndex, $value, \PDO::PARAM_STR);
+                }
             }
+            $stmt->execute();
+            $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
+        } catch (\Throwable $e) {
+            $this->log('error', "Feedple: database query failed ({$e->getMessage()}) | SQL: {$sql} | params: " . json_encode($params));
+            throw $e;
         }
-        $stmt->execute();
-        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
 
         $durationMs = (int) ((microtime(true) - $start) * 1000);
 

@@ -23,6 +23,11 @@ if (function_exists('set_time_limit')) {
     @set_time_limit(0);
 }
 
+// Detach into independent session leader so parent exit / terminal close never terminates worker
+if (function_exists('posix_setsid')) {
+    @posix_setsid();
+}
+
 // Ignore SIGHUP so closing the terminal / session doesn't kill the worker
 if (function_exists('pcntl_signal')) {
     if (function_exists('pcntl_async_signals')) {

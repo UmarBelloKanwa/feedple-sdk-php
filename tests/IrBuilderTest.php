@@ -444,5 +444,74 @@ class IrBuilderTest extends TestCase
         $this->assertStringContainsString('WHERE "user"."account_status" = ? AND ("user"."full_name" ILIKE ? OR "user"."email" ILIKE ?)', $sql);
         $this->assertSame(['active', '%Alice%', '%Alice%'], $params);
     }
+
+    public function testMySqlDialectBackticksAndIlike(): void
+    {
+        $ir = [
+            'operation' => 'query',
+            'table'     => 'user',
+            'fields'    => [
+                ['column' => 'user.full_name', 'expression' => null, 'alias' => 'name'],
+            ],
+            'joins'     => [
+                ['table' => 'authorprofile', 'on_left' => 'user.id', 'on_right' => 'authorprofile.user_id', 'join_type' => 'LEFT'],
+            ],
+            'filters'   => [
+                ['column' => 'user.account_status', 'operator' => 'eq', 'value' => 'active'],
+            ],
+            'filter_groups' => [
+                [
+                    'logic'   => 'or',
+                    'filters' => [
+                        ['column' => 'user.full_name', 'operator' => 'ilike', 'value' => '%Umar Bello Kanwa%'],
+                        ['column' => 'authorprofile.handle', 'operator' => 'ilike', 'value' => '%Umar Bello Kanwa%'],
+                    ],
+                ],
+            ],
+            'order_by'  => ['user.created_at DESC'],
+            'limit'     => 10,
+        ];
+
+        ['sql' => $sql, 'params' => $params] = IrBuilder::buildQueryFromIr($ir, 'mysql');
+
+        $this->assertStringContainsString('SELECT `user`.`full_name` AS `name` FROM `user`', $sql);
+        $this->assertStringContainsString('LEFT JOIN `authorprofile` ON `user`.`id` = `authorprofile`.`user_id`', $sql);
+        $this->assertStringContainsString('WHERE `user`.`account_status` = ? AND (LOWER(`user`.`full_name`) LIKE LOWER(?) OR LOWER(`authorprofile`.`handle`) LIKE LOWER(?))', $sql);
+        $this->assertStringContainsString('ORDER BY `user`.`created_at` DESC', $sql);
+        $this->assertStringContainsString('LIMIT ?', $sql);
+        $this->assertSame(['active', '%Umar Bello Kanwa%', '%Umar Bello Kanwa%', 10], $params);
+    }
+
+    public function testMySqlOffsetWithoutLimit(): void
+    {
+        $ir = [
+            'operation' => 'query',
+            'table'     => 'users',
+            'fields'    => [],
+            'offset'    => 20,
+        ];
+
+        ['sql' => $sql, 'params' => $params] = IrBuilder::buildQueryFromIr($ir, 'mysql');
+
+        $this->assertStringContainsString('LIMIT 18446744073709551615 OFFSET ?', $sql);
+        $this->assertSame([20], $params);
+    }
+
+    public function testMySqlIntervalConversion(): void
+    {
+        $ir = [
+            'operation' => 'query',
+            'table'     => 'orders',
+            'fields'    => [],
+            'filters'   => [
+                ['column' => 'orders.created_at', 'operator' => 'gte', 'value' => "CURRENT_TIMESTAMP - INTERVAL '30 days'"],
+            ],
+        ];
+
+        ['sql' => $sql, 'params' => $params] = IrBuilder::buildQueryFromIr($ir, 'mysql');
+
+        $this->assertStringContainsString('`orders`.`created_at` >= CURRENT_TIMESTAMP - INTERVAL 30 DAY', $sql);
+        $this->assertSame([], $params);
+    }
 }
 

@@ -109,14 +109,14 @@ final class DbConfig implements \JsonSerializable
             \PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION,
         ]);
 
-        // MySQL treats "double quotes" as string literals by default, not
-        // identifier quoting — but the SQL this SDK generates (via
-        // IrBuilder) uses ANSI-style double-quoted identifiers like
-        // "users"."id", matching Postgres/SQLite conventions. ANSI_QUOTES
-        // mode makes MySQL accept that same syntax instead of throwing a
-        // 1064 syntax error on every query.
+        // For MySQL/MariaDB connections, attempt to enable ANSI_QUOTES if possible.
+        // Even if this fails (e.g. read-only permissions), IrBuilder natively uses backticks for MySQL.
         if (strncmp($this->dsn, 'mysql:', 6) === 0) {
-            $pdo->exec("SET SESSION sql_mode=(SELECT CONCAT(@@sql_mode, ',ANSI_QUOTES'))");
+            try {
+                $pdo->exec("SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@sql_mode, ''), 'ANSI_QUOTES')");
+            } catch (\Throwable) {
+                // Ignore if session sql_mode modification is restricted
+            }
         }
 
         return $pdo;

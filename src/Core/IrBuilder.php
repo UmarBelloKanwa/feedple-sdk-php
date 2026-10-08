@@ -40,11 +40,12 @@ class IrBuilder
      * Build a parameterized SQL query from an IR payload.
      *
      * @param  array<string, mixed> $ir
+     * @param  string|null          $driver Database driver name (e.g. 'mysql', 'pgsql', 'sqlite')
      * @return array{sql: string, params: list<mixed>}
      * @throws IrExecutionException
      * @throws \InvalidArgumentException
      */
-    public static function buildQueryFromIr(array $ir): array
+    public static function buildQueryFromIr(array $ir, ?string $driver = null): array
     {
         if (($ir['operation'] ?? '') !== 'query') {
             throw new \InvalidArgumentException(
@@ -57,37 +58,39 @@ class IrBuilder
             throw new \InvalidArgumentException("IR is missing primary 'table'");
         }
 
+        $driver = $driver ? strtolower($driver) : null;
         $params = [];
 
         // 1. SELECT clause
-        $selectClause = self::buildSelectClause($ir['fields'] ?? [], $baseTable, $ir['joins'] ?? []);
+        $selectClause = self::buildSelectClause($ir['fields'] ?? [], $baseTable, $ir['joins'] ?? [], $driver);
 
         // 2. FROM clause
-        $sql = "SELECT {$selectClause} FROM " . self::quoteIdentifier($baseTable);
+        $sql = "SELECT {$selectClause} FROM " . self::quoteIdentifier($baseTable, $driver);
 
         // 3. JOIN clauses
         foreach (($ir['joins'] ?? []) as $join) {
-            $sql .= self::buildJoinClause($join);
+            $sql .= self::buildJoinClause($join, $driver);
         }
 
         // 3b. Multi-source evidence relation derived JOIN
         if (!empty($ir['multi_source_relation'])) {
             $unionParts = [];
             foreach ($ir['multi_source_relation'] as $src) {
-                $uTbl = self::quoteIdentifier($src['table']);
-                $uKey = self::quoteIdentifier($src['entity_key']);
-                $uTs  = self::quoteIdentifier($src['timestamp_column']);
+                $uTbl = self::quoteIdentifier($src['table'], $driver);
+                $uKey = self::quoteIdentifier($src['entity_key'], $driver);
+                $uTs  = self::quoteIdentifier($src['timestamp_column'], $driver);
                 $unionParts[] = "SELECT {$uKey} AS entity_ref, {$uTs} AS event_at FROM {$uTbl}";
             }
             $unionSql = implode(" UNION ALL ", $unionParts);
-            $baseTblQuoted = self::quoteIdentifier($baseTable);
-            $sql     .= " LEFT JOIN ({$unionSql}) AS event_stream ON event_stream.entity_ref = {$baseTblQuoted}.\"id\"";
+            $baseTblQuoted = self::quoteIdentifier($baseTable, $driver);
+            $pkQuoted = self::quoteIdentifier('id', $driver);
+            $sql     .= " LEFT JOIN ({$unionSql}) AS event_stream ON event_stream.entity_ref = {$baseTblQuoted}.{$pkQuoted}";
         }
         // 4. WHERE clause (filters AND filter_groups)
         $whereParts = [];
         if (!empty($ir['filters'])) {
-            [$whereSql, $whereParams] = self::buildConditionList($ir['filters']);
-            if ($whereSql !== '') {
+            [$whereSql, $whereParams] = self::buildConditionList($ir['filters'], $driver);
+            if (trim($whereSql) !== '') {
                 $whereParts[] = $whereSql;
                 $params = array_merge($params, $whereParams);
             }
@@ -101,9 +104,11 @@ class IrBuilder
                 $glue = ($logic === 'AND') ? ' AND ' : ' OR ';
                 $groupParts = [];
                 foreach ($group['filters'] as $f) {
-                    [$fSql, $fParams] = self::buildFilterCondition($f);
-                    $groupParts[] = $fSql;
-                    $params = array_merge($params, $fParams);
+                    [$fSql, $fParams] = self::buildFilterCondition($f, $driver);
+                    if (trim($fSql) !== '') {
+                        $groupParts[] = $fSql;
+                        $params = array_merge($params, $fParams);
+                    }
                 }
                 if (!empty($groupParts)) {
                     $whereParts[] = '(' . implode($glue, $groupParts) . ')';
@@ -117,32 +122,55 @@ class IrBuilder
         // 5. GROUP BY clause
         if (!empty($ir['group_by'])) {
             $groupBy = is_array($ir['group_by']) ? $ir['group_by'] : [$ir['group_by']];
-            $cols    = array_map([self::class, 'resolveColumnRef'], $groupBy);
-            $sql    .= ' GROUP BY ' . implode(', ', $cols);
+            $cols    = [];
+            foreach ($groupBy as $gb) {
+                $gb = trim((string) $gb);
+                if ($gb !== '') {
+                    $cols[] = self::resolveColumnRef($gb, $driver);
+                }
+            }
+            if (!empty($cols)) {
+                $sql .= ' GROUP BY ' . implode(', ', $cols);
+            }
         }
 
         // 6. HAVING clause
         if (!empty($ir['having'])) {
-            [$havingSql, $havingParams] = self::buildConditionList($ir['having']);
-            $sql    .= " HAVING {$havingSql}";
-            $params  = array_merge($params, $havingParams);
+            [$havingSql, $havingParams] = self::buildConditionList($ir['having'], $driver);
+            if (trim($havingSql) !== '') {
+                $sql    .= " HAVING {$havingSql}";
+                $params  = array_merge($params, $havingParams);
+            }
         }
 
         // 7. ORDER BY clause
         if (!empty($ir['order_by'])) {
             $orderBy  = is_array($ir['order_by']) ? $ir['order_by'] : [$ir['order_by']];
-            $orderStr = array_map([self::class, 'resolveOrderByRef'], $orderBy);
-            $sql     .= ' ORDER BY ' . implode(', ', $orderStr);
+            $orderStr = [];
+            foreach ($orderBy as $ob) {
+                $ob = trim((string) $ob);
+                if ($ob !== '') {
+                    $orderStr[] = self::resolveOrderByRef($ob, $driver);
+                }
+            }
+            if (!empty($orderStr)) {
+                $sql .= ' ORDER BY ' . implode(', ', $orderStr);
+            }
         }
 
-        // 8. LIMIT
-        if (isset($ir['limit']) && $ir['limit'] !== null) {
+        // 8. LIMIT and OFFSET
+        $hasLimit = isset($ir['limit']) && $ir['limit'] !== null && $ir['limit'] !== '';
+        $hasOffset = isset($ir['offset']) && $ir['offset'] !== null && $ir['offset'] !== '';
+
+        if ($hasLimit) {
             $sql     .= ' LIMIT ?';
             $params[] = (int) $ir['limit'];
+        } elseif ($hasOffset && $driver === 'mysql') {
+            // MySQL/MariaDB syntax forbids OFFSET without LIMIT
+            $sql     .= ' LIMIT 18446744073709551615';
         }
 
-        // 9. OFFSET
-        if (isset($ir['offset']) && $ir['offset'] !== null) {
+        if ($hasOffset) {
             $sql     .= ' OFFSET ?';
             $params[] = (int) $ir['offset'];
         }
@@ -160,13 +188,13 @@ class IrBuilder
      * When no fields are given, selects all columns from all involved tables
      * (mirrors: return [tables_by_name[name] for name in tables_by_name]).
      */
-    private static function buildSelectClause(array $fields, string $baseTable, array $joins): string
+    private static function buildSelectClause(array $fields, string $baseTable, array $joins, ?string $driver = null): string
     {
         if (empty($fields)) {
             // Select all columns: base table + joined tables
             $tables   = [$baseTable, ...array_column($joins, 'table')];
             $selects  = array_map(
-                static fn(string $t): string => self::quoteIdentifier($t) . '.*',
+                static fn(string $t): string => self::quoteIdentifier($t, $driver) . '.*',
                 $tables
             );
             return implode(', ', $selects);
@@ -178,7 +206,7 @@ class IrBuilder
                 throw new \InvalidArgumentException("Field missing 'column' key");
             }
             $colRef  = $field['column'];
-            $colSql  = self::resolveColumnRef($colRef);
+            $colSql  = self::resolveColumnRef($colRef, $driver);
             $exprRaw = $field['expression'] ?? null;
 
             if ($exprRaw !== null) {
@@ -187,7 +215,7 @@ class IrBuilder
             }
 
             if (!empty($field['alias'])) {
-                $colSql .= ' AS ' . self::quoteIdentifier((string) $field['alias']);
+                $colSql .= ' AS ' . self::quoteIdentifier((string) $field['alias'], $driver);
             }
 
             $parts[] = $colSql;
@@ -228,7 +256,7 @@ class IrBuilder
      *
      * Mirrors: the join loop in build_query_from_ir
      */
-    private static function buildJoinClause(array $join): string
+    private static function buildJoinClause(array $join, ?string $driver = null): string
     {
         if (!isset($join['table'])) {
             throw new \InvalidArgumentException("Join missing 'table'");
@@ -247,10 +275,10 @@ class IrBuilder
         $isOuter   = in_array($joinType, ['LEFT', 'LEFT OUTER'], true);
 
         $keyword   = $isOuter ? 'LEFT JOIN' : 'INNER JOIN';
-        $leftSql   = self::resolveColumnRef($onLeft);
-        $rightSql  = self::resolveColumnRef($onRight);
+        $leftSql   = self::resolveColumnRef($onLeft, $driver);
+        $rightSql  = self::resolveColumnRef($onRight, $driver);
 
-        return " {$keyword} " . self::quoteIdentifier($joinTable) . " ON {$leftSql} = {$rightSql}";
+        return " {$keyword} " . self::quoteIdentifier($joinTable, $driver) . " ON {$leftSql} = {$rightSql}";
     }
 
     /**
@@ -259,17 +287,20 @@ class IrBuilder
      * Mirrors: and_(*[_build_filter_condition(f, tables_by_name) for f in filters])
      *
      * @param  array<int, array<string, mixed>> $conditions  (filters or having)
+     * @param  string|null                      $driver
      * @return array{0: string, 1: list<mixed>}
      */
-    private static function buildConditionList(array $conditions): array
+    private static function buildConditionList(array $conditions, ?string $driver = null): array
     {
         $parts  = [];
         $params = [];
 
         foreach ($conditions as $condition) {
-            [$condSql, $condParams] = self::buildFilterCondition($condition);
-            $parts[]  = $condSql;
-            $params   = array_merge($params, $condParams);
+            [$condSql, $condParams] = self::buildFilterCondition($condition, $driver);
+            if (trim($condSql) !== '') {
+                $parts[]  = $condSql;
+                $params   = array_merge($params, $condParams);
+            }
         }
 
         return [implode(' AND ', $parts), $params];
@@ -281,9 +312,10 @@ class IrBuilder
      * Mirrors: _build_filter_condition(f, tables_by_name)
      *
      * @param  array<string, mixed> $filter
+     * @param  string|null          $driver
      * @return array{0: string, 1: list<mixed>}
      */
-    private static function buildFilterCondition(array $filter): array
+    private static function buildFilterCondition(array $filter, ?string $driver = null): array
     {
         if (!isset($filter['operator'])) {
             throw new \InvalidArgumentException("Filter missing 'operator'");
@@ -294,7 +326,7 @@ class IrBuilder
         $operator = strtolower($filter['operator']);
         $colRef   = $filter['column'];
         $value    = $filter['value'] ?? null;
-        $colSql   = self::resolveColumnRef($colRef);
+        $colSql   = self::resolveColumnRef($colRef, $driver);
 
         // Comparison operators (mirrors _OPERATOR_BUILDERS dict)
         $comparisonMap = [
@@ -309,7 +341,18 @@ class IrBuilder
         if (isset($comparisonMap[$operator])) {
             // Check if value is a raw SQL datetime expression like CURRENT_TIMESTAMP - INTERVAL '30 days' or NOW()
             if (is_string($value) && preg_match('/^(CURRENT_TIMESTAMP|NOW\(\)|CURRENT_DATE)\b/i', trim($value))) {
-                return ["{$colSql} {$comparisonMap[$operator]} {$value}", []];
+                $dtExpr = $value;
+                if ($driver === 'mysql') {
+                    $dtExpr = preg_replace_callback(
+                        '/INTERVAL\s*[\'"](\d+)\s*([a-zA-Z]+)[\'"]/i',
+                        function ($m) {
+                            $unit = rtrim(strtoupper($m[2]), 'S');
+                            return "INTERVAL {$m[1]} {$unit}";
+                        },
+                        $dtExpr
+                    );
+                }
+                return ["{$colSql} {$comparisonMap[$operator]} {$dtExpr}", []];
             }
             return ["{$colSql} {$comparisonMap[$operator]} ?", [$value]];
         }
@@ -342,6 +385,9 @@ class IrBuilder
             return ["{$colSql} LIKE ?", [$value]];
         }
         if ($operator === 'ilike') {
+            if ($driver === 'mysql') {
+                return ["LOWER({$colSql}) LIKE LOWER(?)", [$value]];
+            }
             return ["{$colSql} ILIKE ?", [$value]];
         }
 
@@ -365,18 +411,18 @@ class IrBuilder
      * The Python version uses SQLAlchemy column() objects with _selectable;
      * in PHP we produce a quoted SQL string directly.
      */
-    private static function resolveColumnRef(string $ref): string
+    private static function resolveColumnRef(string $ref, ?string $driver = null): string
     {
         if (preg_match('/^(MAX|MIN|COUNT|SUM|AVG)\s*\((.+)\)$/i', trim($ref), $matches)) {
             $fn = strtoupper($matches[1]);
-            $inner = self::resolveColumnRef($matches[2]);
+            $inner = self::resolveColumnRef($matches[2], $driver);
             return "{$fn}({$inner})";
         }
         if (strpos($ref, '.') !== false) {
             [$tablePart, $colPart] = explode('.', $ref, 2);
-            return self::quoteIdentifier($tablePart) . '.' . self::quoteIdentifier($colPart);
+            return self::quoteIdentifier($tablePart, $driver) . '.' . self::quoteIdentifier($colPart, $driver);
         }
-        return self::quoteIdentifier($ref);
+        return self::quoteIdentifier($ref, $driver);
     }
 
     /**
@@ -385,22 +431,26 @@ class IrBuilder
      *
      * Mirrors: _resolve_order_by_column(order_string, tables_by_name)
      */
-    private static function resolveOrderByRef(string $orderString): string
+    private static function resolveOrderByRef(string $orderString, ?string $driver = null): string
     {
         $parts   = preg_split('/\s+/', trim($orderString));
-        $colSql  = self::resolveColumnRef($parts[0]);
+        $colSql  = self::resolveColumnRef($parts[0], $driver);
         $direction = isset($parts[1]) && strtoupper($parts[1]) === 'DESC' ? 'DESC' : 'ASC';
         return "{$colSql} {$direction}";
     }
 
     /**
-     * Quote a SQL identifier (table or column name) with double quotes.
+     * Quote a SQL identifier (table or column name).
+     * Backticks for MySQL/MariaDB; double quotes for Postgres/SQLite/default.
      * Only allows safe identifier characters to prevent injection.
      */
-    private static function quoteIdentifier(string $name): string
+    private static function quoteIdentifier(string $name, ?string $driver = null): string
     {
         if (!preg_match('/^[a-zA-Z0-9_$]+$/', $name)) {
             throw new \InvalidArgumentException("Invalid SQL identifier: {$name}");
+        }
+        if ($driver === 'mysql') {
+            return '`' . $name . '`';
         }
         return '"' . $name . '"';
     }
