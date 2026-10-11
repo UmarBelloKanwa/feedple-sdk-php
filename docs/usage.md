@@ -94,29 +94,31 @@ sdk-php/
     ├── FeedpleSDK.php            # Main SDK client, background launcher, and orchestrator
     ├── worker.php                # Standalone background worker process entrypoint
     └── Core/
-        ├── FeedpleWebSocket.php  # Persistent background connection client
+        ├── FeedpleWebSocket.php  # Persistent background connection client (WebSocket mode)
         ├── Identity.php          # Security dataclass defining tenant table access rules
         ├── IrBuilder.php         # IR JSON to parameterized SQL string & params builder
-        ├── JsonSerializer.php  # Safe JSON encoder handling DateTimeInterface & objects
+        ├── JsonSerializer.php    # Safe JSON encoder handling DateTimeInterface & objects
         ├── PolicyEngine.php      # Table-level Role-Based Access Control (RBAC) engine
         ├── SchemaServices.php    # Schema introspection, hashing, and sensitive column filter
         ├── SqlCompiler.php       # Regex-based SQL table extractor & policy validator
+        ├── WebhookBridge.php     # Autonomous, stateless HTTP webhook bridge (Webhook mode)
         └── Exceptions/
             ├── AuthException.php         # Thrown when authentication handshake fails
             ├── IrExecutionException.php  # Thrown when IR query build/execution fails
-            └── SchemaSyncException.php # Thrown on schema synchronization failures
+            └── SchemaSyncException.php   # Thrown on schema synchronization failures
 ```
 
 ### Module Responsibilities
 
-- **`Feedple\Sdk\FeedpleSDK`**: Primary entrypoint class. Handles DB health verification (`SELECT 1`), PID-based worker idempotency, background worker spawning via `proc_open()`, schema sync scheduling, and query execution dispatch.
+- **`Feedple\Sdk\FeedpleSDK`**: Primary entrypoint class. Supports dual transport (`'webhook'` or `'websocket'`), DB health verification (`SELECT 1`), HTTP/WS schema synchronization (`syncSchemaHttp()`, `syncSchema()`), and IR query execution (`executeIr()`).
+- **`Feedple\Sdk\Core\WebhookBridge`**: Autonomous, stateless HTTP webhook processor. Cryptographically validates HMAC-SHA256 signatures (`X-Feedple-Signature`), prevents replay attacks via timestamp clock skew tolerance, executes queries within the web request lifecycle in ~15-30ms, and returns structured JSON responses.
 - **`Feedple\Sdk\DbConfig`**: Immutable database configuration builder providing named constructors (`mysql()`, `pgsql()`, `sqlite()`, `raw()`). Protects passwords with `#[\SensitiveParameter]`, custom `__debugInfo()`, and automatically configures MySQL `ANSI_QUOTES` mode.
 - **`Feedple\Sdk\Core\Identity`**: Value object holding `$name`, `$allowedTables`, and `$allTables` flags.
 - **`Feedple\Sdk\Core\PolicyEngine`**: Enforces table-level access rules via `canAccessTable()` and `validateIrAccess()`.
 - **`Feedple\Sdk\Core\IrBuilder`**: Translates flat IR JSON objects into `['sql' => string, 'params' => array]` for PDO prepared statements.
 - **`Feedple\Sdk\Core\SqlCompiler`**: Regex table extractor for raw SQL statements that validates table access against `PolicyEngine`.
 - **`Feedple\Sdk\Core\SchemaServices`**: Introspects MySQL, PostgreSQL, and SQLite databases using `INFORMATION_SCHEMA` or `PRAGMA` queries. Computes SHA-256 schema hashes and strips sensitive columns.
-- **`Feedple\Sdk\Core\FeedpleWebSocket`**: Persistent connection client managing authentication, heartbeats, chunked schema transmission (`sendSchema`), and IR request routing.
+- **`Feedple\Sdk\Core\FeedpleWebSocket`**: Persistent connection client managing authentication, heartbeats, chunked schema transmission (`sendSchema`), and IR request routing (used in WebSocket daemon mode).
 - **`Feedple\Sdk\Core\JsonSerializer`**: Encodes/decodes JSON safely, serializing `DateTimeInterface` objects to ISO 8601 (`ATOM`) strings and stripping private `_`-prefixed object properties.
 
 ---
@@ -186,21 +188,49 @@ Main orchestrator class.
 | `$dbConfig` | `DbConfig` | **required** | Connection configuration instance. |
 | `$identity` | `Identity` | **required** | Security identity controlling table access. |
 | `$autoloadPath` | `?string` | `null` | Path to `vendor/autoload.php`. Guessed automatically if `null`. |
-| `$autoSync` | `bool` | `true` | Automatically inspect and sync schema periodically. |
+| `$autoSync` | `bool` | `true` | Automatically inspect and sync schema periodically (WebSocket mode). |
 | `$syncInterval` | `int` | `60` | Interval in seconds between background schema sync cycles. |
-| `$reconnectEnabled` | `bool` | `true` | Automatically reconnect on connection drop. |
+| `$reconnectEnabled` | `bool` | `true` | Automatically reconnect on connection drop (WebSocket mode). |
 | `$maxRetries` | `?int` | `null` | Maximum reconnect attempts (`null` = unlimited). |
 | `$probeBeforeConnect`| `bool` | `false` | Perform HTTP GET probe prior to handshake to surface 403 errors. |
 | `$logger` | `?LoggerInterface`| `null` | PSR-3 logger instance. Writes to `feedple-sdk.log` if `null`. |
 | `$runtimeDir` | `?string` | `null` | Directory for control/pid/log files (defaults to `sys_get_temp_dir()`). |
+| `$isWorkerProcess` | `bool` | `false` | Internal flag set only by worker child process. |
+| `$transport` | `?string` | `'websocket'` | `'webhook'` (stateless HTTP bridge, recommended for web) or `'websocket'` (persistent daemon). |
 
 #### Public Methods
 
-- **`syncSchema(): void`**:
-  Manually triggers database schema inspection and transmits updated definitions over the secure connection if the SHA-256 schema hash differs.
+- **`syncSchemaHttp(?string $apiBaseUrl = null, bool $force = false, ?string $webhookUrl = null): array`**:
+  Executes an immediate one-shot schema synchronization over HTTPS. Bypasses daemon workers and registers your application's webhook bridge URL with Feedple Cloud. Returns:
+  ```php
+  [
+      'status'                 => 'success',
+      'schema_version'         => 2,
+      'skipped'                => false,
+      'tables_count'           => 34,
+      'registered_webhook_url' => 'https://myapp.com/api/feedple/bridge',
+      'webhook_secret'         => 'whsec_...',
+  ]
+  ```
+
+- **`executeIr(array $ir): array`**:
+  Validates table RBAC through `PolicyEngine`, converts the IR AST into parameterized SQL via `IrBuilder`, executes against PDO, and returns:
+  ```php
+  [
+      'rows'        => [...],
+      'count'       => 53,
+      'duration_ms' => 12,
+  ]
+  ```
+
+- **`syncSchema(?string $webhookUrl = null): void`**:
+  Manually triggers database schema inspection and transmits updated definitions over an active WebSocket connection.
 
 - **`stop(): void`**:
   Terminates the background worker process using cross-platform system signals (`taskkill` on Windows, `kill -TERM` on Linux/macOS) and cleans up the `.pid` file.
+
+- **`getTransport(): string`** / **`setTransport(string $transport): void`**:
+  Inspects or updates the active transport strategy (`'webhook'` or `'websocket'`).
 
 - **`buildCompiler(): SqlCompiler`**:
   Returns a new `SqlCompiler` instance bound to the current `Identity` policy.
@@ -277,7 +307,49 @@ $admin = new Identity(
 
 ---
 
-### 4. `IrBuilder`
+### 4. `WebhookBridge`
+
+Autonomous, stateless HTTP bridge for query execution. Operates completely within standard PHP web requests (Apache, PHP-FPM, cPanel, Laravel, Bref/Lambda) without background workers or event loops.
+
+```php
+use Feedple\Sdk\Core\WebhookBridge;
+
+$bridge = new WebhookBridge(
+    sdk:           $sdk,
+    webhookSecret: getenv('FEEDPLE_WEBHOOK_SECRET'), // whsec_...
+    tolerance:     300 // 5 minutes clock skew tolerance
+);
+
+// Process incoming webhook
+$rawBody = file_get_contents('php://input') ?: '';
+$headers = getallheaders() ?: [];
+
+$result = $bridge->handle($rawBody, $headers);
+
+http_response_code($result['status_code']);
+header('Content-Type: application/json');
+echo json_encode($result['body']);
+```
+
+#### Cryptographic Signature Verification
+- Inbound requests from Feedple Cloud contain the `X-Feedple-Signature` header in the format `t={timestamp},v1={hash}`.
+- `WebhookBridge::verifySignature()` computes `hash_hmac('sha256', "{$timestamp}.{$rawBody}", $secret)`.
+- If the signature is invalid, secret missing, or the timestamp deviates by more than `$tolerance` seconds (clock drift or replay attack), the bridge rejects the request with HTTP `401 Unauthorized`.
+- Supports zero-downtime secret rotation by accepting comma-separated secret strings (`whsec_new,whsec_old`) or arrays of secrets.
+
+#### Standard HTTP Response Structure
+
+| HTTP Status | Body Status | Meaning |
+| :--- | :--- | :--- |
+| **`200 OK`** | `status: "success"` | Query executed successfully. Contains `rows`, `count`, `duration_ms`, `request_id`. |
+| **`200 OK`** | `status: "error"` | Business or policy error (e.g. `POLICY_VIOLATION`, `EXECUTION_ERROR`) with `code` and `reason`. |
+| **`401 Unauthorized`** | `status: "error"` | Invalid signature, timestamp clock skew, or unconfigured webhook secret (`code: "UNAUTHORIZED"`). |
+| **`400 Bad Request`** | `status: "error"` | Malformed JSON request body or payload (`code: "INVALID_JSON"`). |
+| **`422 Unprocessable`** | `status: "error"` | Missing required `ir` query object (`code: "MISSING_IR"`). |
+
+---
+
+### 5. `IrBuilder`
 
 Converts flat JSON IR objects into parameterized SQL strings and parameter arrays.
 
@@ -567,21 +639,28 @@ namespace Feedple\Sdk;
 class FeedpleSDK
 {
     public function __construct(
-        string $apiKey,
-        DbConfig $dbConfig,
-        Identity $identity,
-        ?string $autoloadPath = null,
-        bool $autoSync = true,
-        int $syncInterval = 60,
-        bool $reconnectEnabled = true,
-        ?int $maxRetries = null,
-        bool $probeBeforeConnect = false,
-        ?LoggerInterface $logger = null,
-        ?string $runtimeDir = null
+        string            $apiKey,
+        DbConfig          $dbConfig,
+        Identity          $identity,
+        ?string           $autoloadPath        = null,
+        bool              $autoSync            = true,
+        int               $syncInterval        = 60,
+        bool              $reconnectEnabled    = true,
+        ?int              $maxRetries          = null,
+        bool              $probeBeforeConnect  = false,
+        ?LoggerInterface  $logger              = null,
+        ?string           $runtimeDir          = null,
+        bool              $isWorkerProcess     = false,
+        ?string           $transport           = null // 'webhook' or 'websocket'
     );
 
-    public function syncSchema(): void;
-    public function stop(): void;
+    public function run(): void; // starts worker event loop (blocking)
+    public function stop(): void; // stops worker process
+    public function syncSchema(?string $webhookUrl = null): void; // sync over WebSocket
+    public function syncSchemaHttp(?string $apiBaseUrl = null, bool $force = false, ?string $webhookUrl = null): array; // HTTP one-shot sync
+    public function executeIr(array $ir): array; // validates RBAC and executes IR AST
+    public function getTransport(): string;
+    public function setTransport(string $transport): void;
     public function buildCompiler(): SqlCompiler;
     public function log(string $level, string $message): void;
     public static function runWorker(string $controlFilePath): void;
@@ -599,6 +678,26 @@ final class DbConfig implements \JsonSerializable
     public static function sqlite(string $path, array $options = []): self;
     public static function raw(string $dsn, ?string $username = null, ?string $password = null, array $options = []): self;
     public function toPdo(): \PDO;
+}
+```
+
+### `WebhookBridge`
+```php
+namespace Feedple\Sdk\Core;
+
+class WebhookBridge
+{
+    public function __construct(FeedpleSDK $sdk, ?string $webhookSecret = null, int $tolerance = 300);
+
+    public static function verifySignature(
+        string $rawBody,
+        ?string $signatureHeader,
+        string|array|null $secret = null,
+        int $tolerance = 300
+    ): array; // ['valid' => bool, 'reason' => ?string, 'timestamp' => ?int]
+
+    public function handle(string $rawBody, array $headers): array;
+    // Returns: ['status_code' => int, 'body' => array]
 }
 ```
 
@@ -644,6 +743,52 @@ sleep(3);
 echo "Stopping SDK worker...\n";
 $sdk->stop();
 echo "SDK worker stopped.\n";
+```
+
+### Stateless HTTP Webhook Bridge Script (`public/bridge.php`)
+
+```php
+<?php
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use Feedple\Sdk\FeedpleSDK;
+use Feedple\Sdk\DbConfig;
+use Feedple\Sdk\Core\Identity;
+use Feedple\Sdk\Core\WebhookBridge;
+
+$sdk = new FeedpleSDK(
+    apiKey:    getenv('FEEDPLE_API_KEY'),
+    dbConfig:  DbConfig::mysql(
+        host:     getenv('DB_HOST') ?: '127.0.0.1',
+        database: getenv('DB_DATABASE') ?: 'myapp',
+        username: getenv('DB_USERNAME') ?: 'root',
+        password: getenv('DB_PASSWORD') ?: '',
+    ),
+    identity:  new Identity(name: 'production', allTables: true),
+    transport: 'webhook',
+);
+
+$bridge = new WebhookBridge(
+    sdk:           $sdk,
+    webhookSecret: getenv('FEEDPLE_WEBHOOK_SECRET')
+);
+
+// Support health check
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    header('Content-Type: application/json');
+    echo json_encode(['status' => 'active', 'service' => 'Feedple Webhook Bridge']);
+    exit(0);
+}
+
+$rawBody = file_get_contents('php://input') ?: '';
+$headers = getallheaders() ?: [];
+
+$result = $bridge->handle($rawBody, $headers);
+
+http_response_code($result['status_code']);
+header('Content-Type: application/json');
+echo json_encode($result['body']);
 ```
 
 ---

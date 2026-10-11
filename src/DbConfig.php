@@ -39,8 +39,8 @@ final class DbConfig implements \JsonSerializable
 
     private function __construct(
         string $dsn,
-        string $username = null,
-        string $password = null,
+        ?string $username = null,
+        ?string $password = null,
         array $options = []
     ) {
         $this->dsn = $dsn;
@@ -52,8 +52,8 @@ final class DbConfig implements \JsonSerializable
     public static function mysql(
         string $host,
         string $database,
-        string $username = null,
-        string $password = null,
+        ?string $username = null,
+        ?string $password = null,
         int $port = 3306,
         string $charset = 'utf8mb4',
         array $options = []
@@ -69,13 +69,20 @@ final class DbConfig implements \JsonSerializable
     public static function pgsql(
         string $host,
         string $database,
-        string $username = null,
-        string $password = null,
+        ?string $username = null,
+        ?string $password = null,
         int $port = 5432,
         array $options = []
     ): self {
+        $dsn = "pgsql:host={$host};port={$port};dbname={$database}";
+        if (isset($options['sslmode'])) {
+            $dsn .= ";sslmode={$options['sslmode']}";
+            unset($options['sslmode']);
+        } elseif (str_contains($host, 'supabase.co')) {
+            $dsn .= ";sslmode=require";
+        }
         return new self(
-            "pgsql:host={$host};port={$port};dbname={$database}",
+            $dsn,
             $username,
             $password,
             $options
@@ -96,8 +103,8 @@ final class DbConfig implements \JsonSerializable
     /** Escape hatch for any other PDO-supported driver or unusual DSN. */
     public static function raw(
         string $dsn,
-        string $username = null,
-        string $password = null,
+        ?string $username = null,
+        ?string $password = null,
         array $options = []
     ): self {
         return new self($dsn, $username, $password, $options);

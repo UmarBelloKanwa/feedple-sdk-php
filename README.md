@@ -10,49 +10,51 @@ The official PHP SDK for the [Feedple AI](https://feedple.ai) platform. Connect 
 
 ## Table of Contents
 
-- [How It Works](#how-it-works)
+- [Dual-Transport Architecture](#dual-transport-architecture)
+- [Stateless HTTP Webhook (Production & Shared Hosting)](#stateless-http-webhook-production--shared-hosting)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Laravel Integration](#laravel-integration)
 - [Configuration](#configuration)
 - [Identity & Access Control](#identity--access-control)
 - [Schema Sync](#schema-sync)
 - [IR Query Execution](#ir-query-execution)
-- [Connection Management](#connection-management)
-- [Utilities](#utilities)
-- [Running in Production](#running-in-production)
 - [API Reference](#api-reference)
 - [License](#license)
 
 ---
 
-## How It Works
+## Dual-Transport Architecture
 
-```
-Your App                      Feedple SDK                     Feedple API
-    │                              │                               │
-    │  new FeedpleSDK(…)           │                               │
-    │─────────────────────────────>│                               │
-    │  $sdk->run()                 │                               │
-    │─────────────────────────────>│── connect() ─────────────────>│
-    │                              │<─ auth.ack (session_id) ──────│
-    │                              │                               │
-    │                              │── schema.started ────────────>│
-    │                              │── schema.data (chunks) ──────>│
-    │                              │── schema.completed ──────────>│
-    │                              │                               │
-    │                              │<─ ir.request (IR payload) ────│
-    │                              │── ir.ack ────────────────────>│
-    │                              │  [executes SQL against DB]    │
-    │                              │── ir.result ─────────────────>│
-    │                              │                               │
-```
+Feedple provides a dual-transport architecture designed to suit both shared hosting / serverless environments and local development:
 
-1. **Connect & Authenticate** — Establishes a secure background connection and authenticates your API key. The server responds with a `session_id` used to resume sessions after disconnects.
-2. **Sync Schema** — Inspects your database (tables, columns, PKs, FKs, indexes) and sends the schema to Feedple in chunks. Re-syncs on a configurable interval; skips if nothing changed.
-3. **Execute Queries** — Receives incoming IR query requests from Feedple, enforces RBAC, executes them safely as parameterized PDO statements, and returns the results.
+1. **Production: Stateless HTTP Webhook** (`FEEDPLE_TRANSPORT=webhook`)
+   - Optimized for shared hosting (Namecheap, cPanel, CloudLinux LVE, CageFS) and serverless (AWS Lambda / Bref).
+   - **Zero persistent processes, zero background daemons, zero ReactPHP event loops.**
+   - Feedple Cloud sends cryptographically signed HTTPS POST requests (`HMAC-SHA256`) to your registered webhook endpoint (`/api/feedple/bridge`).
+   - The query compiles and executes against your database within the HTTP lifecycle in ~15-30ms.
+   - Schema synchronization is performed on-demand or via one-shot cron (`php artisan feedple:sync`).
+
+2. **Development: Persistent WebSocket** (`FEEDPLE_TRANSPORT=websocket`)
+   - Ideal for local development or dedicated VPS where persistent long-lived background daemons are permitted.
+   - Connects outbound to `wss://...` with auto-reconnection and real-time streaming.
 
 ---
+
+## Stateless HTTP Webhook (Production & Shared Hosting)
+
+```
+Feedple Cloud                      Your Webhook Bridge (/api/feedple/bridge)        Your Database
+     │                                                │                                  │
+     │── HTTPS POST (IR query + HMAC Signature) ─────>│                                  │
+     │                                                │── Verify HMAC-SHA256 Signature   │
+     │                                                │── Validate IR AST & RBAC         │
+     │                                                │── Compile Parameterized SQL ────>│
+     │                                                │<─ Query Result (rows) ───────────│
+     │<─ HTTP 200 JSON Response (status, data, rows) ─│                                  │
+     │   [Completed in 15-30ms, no daemon required]   │                                  │
+```
 
 ## Requirements
 
@@ -75,67 +77,206 @@ No additional configuration is needed — Composer's autoloader handles all clas
 
 ## Quick Start
 
+### 1. Stateless HTTP Webhook (Recommended for Web & Shared Hosting)
+
+In web applications, APIs, and shared hosting (Apache, PHP-FPM, cPanel, Nginx, Lambda/Bref), use the **Stateless Webhook Bridge**. It requires zero background workers, zero ReactPHP loops, and zero daemon processes.
+
 ```php
 <?php
+// public/feedple-bridge.php (or your framework route handler)
 require __DIR__ . '/vendor/autoload.php';
 
 use Feedple\Sdk\FeedpleSDK;
+use Feedple\Sdk\DbConfig;
 use Feedple\Sdk\Core\Identity;
+use Feedple\Sdk\Core\WebhookBridge;
 
-// 1. Create a PDO connection to your database
-$pdo = new PDO(
-    'mysql:host=localhost;dbname=myapp;charset=utf8mb4',
-    'db_user',
-    'db_pass',
-    [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]
+// 1. Configure your database connection
+$dbConfig = DbConfig::mysql(
+    host:     '127.0.0.1',
+    database: 'myapp',
+    username: 'db_user',
+    password: 'db_password',
 );
 
-// 2. Define which tables Feedple can access
+// 2. Define table access permissions
 $identity = new Identity(
     name:      'production',
-    allTables: true,           // expose every table, or…
-    // allowedTables: ['users', 'orders', 'products'],  // …restrict to specific tables
+    allTables: true,           // expose all tables, or specify:
+    // allowedTables: ['users', 'orders', 'products'],
 );
 
-// 3. Initialise the SDK
+// 3. Initialize the SDK in stateless webhook mode
 $sdk = new FeedpleSDK(
-    apiKey:   'sk_live_...',
-    db:       $pdo,
-    identity: $identity,
+    apiKey:    getenv('FEEDPLE_API_KEY'),
+    dbConfig:  $dbConfig,
+    identity:  $identity,
+    transport: 'webhook',
 );
 
-// 4. Start the SDK — this call blocks until stop() is called.
-//    Run this script as a CLI worker or background process.
+// 4. Handle incoming Feedple Cloud webhook queries
+$bridge = new WebhookBridge(
+    sdk:           $sdk,
+    webhookSecret: getenv('FEEDPLE_WEBHOOK_SECRET')
+);
+
+$rawBody = file_get_contents('php://input') ?: '';
+$headers = getallheaders() ?: [];
+
+$result = $bridge->handle($rawBody, $headers);
+
+http_response_code($result['status_code']);
+header('Content-Type: application/json');
+echo json_encode($result['body']);
+```
+
+### 2. Persistent WebSocket Worker (For Dedicated CLI Daemons)
+
+If you are running a dedicated CLI worker on a VPS or container:
+
+```php
+<?php
+// worker.php
+require __DIR__ . '/vendor/autoload.php';
+
+use Feedple\Sdk\FeedpleSDK;
+use Feedple\Sdk\DbConfig;
+use Feedple\Sdk\Core\Identity;
+
+$sdk = new FeedpleSDK(
+    apiKey:    getenv('FEEDPLE_API_KEY'),
+    dbConfig:  DbConfig::mysql(host: '127.0.0.1', database: 'myapp', username: 'db_user', password: 'secret'),
+    identity:  new Identity(name: 'worker', allTables: true),
+    transport: 'websocket',
+);
+
+// Starts the ReactPHP event loop (blocks until stopped)
 $sdk->run();
 ```
 
-> **Important:** `run()` starts the [ReactPHP](https://reactphp.org/) event loop, which **blocks** until `stop()` is called. In a web application, call this in a dedicated CLI worker process — not inside a request handler.
+---
+
+## Laravel Integration
+
+In Laravel applications, Feedple runs completely autonomously in stateless HTTP webhook mode without requiring background workers, ReactPHP loops, or supervisor daemons.
+
+### 1. Environment Configuration (`.env`)
+
+Feedple uses two credentials for secure dual-direction communication:
+
+```ini
+# Outbound: Used by your application to authenticate outgoing requests to Feedple Cloud
+FEEDPLE_API_KEY=fdpl_live_your_actual_api_key
+
+# Inbound: Used by WebhookBridge to cryptographically verify incoming webhook signatures
+FEEDPLE_WEBHOOK_SECRET=whsec_your_webhook_signing_secret
+
+# Transport & Bridge settings
+FEEDPLE_TRANSPORT=webhook
+FEEDPLE_BRIDGE_PATH=/api/feedple/bridge
+FEEDPLE_API_BASE_URL=https://feedple-ai-614817435356.us-central1.run.app/api/v1
+```
+
+> **Note on Keys:**
+> - `FEEDPLE_API_KEY` authenticates outbound API calls (e.g. `php artisan feedple:sync`) to Feedple Cloud.
+> - `FEEDPLE_WEBHOOK_SECRET` is the shared secret used by `WebhookBridge` to verify `X-Feedple-Signature` on incoming queries dispatched from Feedple Cloud.
+
+### 2. Auto-Registered Bridge Route
+
+When using the `FeedpleServiceProvider`, the bridge endpoint is registered automatically at `POST /api/feedple/bridge` and exempted from CSRF protection:
+
+```bash
+# Test bridge reachability in terminal or browser
+curl http://localhost:8000/api/feedple/bridge
+```
+Returns:
+```json
+{"status":"active","service":"Feedple Webhook Bridge","transport":"webhook","configured":true,"secret_set":true}
+```
+
+### 3. Synchronize Schema & Auto-Register Bridge
+
+To sync your database schema with Feedple Cloud and automatically register your bridge URL:
+
+```bash
+php artisan feedple:sync
+```
+
+When you run `feedple:sync`:
+1. It inspects your database schema (tables, columns, primary keys, foreign keys).
+2. It auto-detects your webhook bridge URL (`APP_URL + /api/feedple/bridge`).
+3. It sends the schema to Feedple Cloud over HTTP.
+4. Feedple Cloud registers the webhook URL and provisions your `FEEDPLE_WEBHOOK_SECRET` automatically!
+
+Options:
+- `--force`: Force schema update even if the hash matches.
+- `--bridge-url=https://xyz.ngrok.io/api/feedple/bridge`: Override the registered bridge URL (useful for tunneling in local dev).
 
 ---
 
 ## Configuration
 
-All constructor parameters except the first three are optional.
+### `DbConfig` Factories
+
+Feedple uses immutable `DbConfig` objects to protect credentials and handle driver differences:
+
+```php
+use Feedple\Sdk\DbConfig;
+
+// MySQL / MariaDB
+$dbConfig = DbConfig::mysql(
+    host:     '127.0.0.1',
+    database: 'myapp',
+    username: 'root',
+    password: 'secret_password',
+    port:     3306,
+    charset:  'utf8mb4'
+);
+
+// PostgreSQL
+$dbConfig = DbConfig::pgsql(
+    host:     '127.0.0.1',
+    database: 'myapp',
+    username: 'postgres',
+    password: 'secret_password',
+    port:     5432
+);
+
+// SQLite
+$dbConfig = DbConfig::sqlite(path: '/path/to/database.sqlite');
+
+// Custom / Raw DSN
+$dbConfig = DbConfig::raw(
+    dsn:      'sqlsrv:Server=localhost;Database=myapp',
+    username: 'sa',
+    password: 'secret_password'
+);
+```
+
+### SDK Constructor
 
 ```php
 $sdk = new FeedpleSDK(
     // Required
-    apiKey:   'sk_live_...',      // Your Feedple API key
-    db:       $pdo,               // PDO connection
-    identity: $identity,          // Identity (see below)
+    apiKey:    'fdpl_live_...',    // Your Feedple API key
+    dbConfig:  $dbConfig,          // DbConfig instance
+    identity:  $identity,          // Table access identity
+
+    // Transport (Default: 'websocket', or 'webhook' for stateless web mode)
+    transport: 'webhook',
 
     // Schema sync
-    autoSync:     true,           // Sync schema on startup and periodically (default: true)
-    syncInterval: 60,             // Seconds between sync cycles (default: 60)
+    autoSync:     true,            // Periodic sync (used in websocket mode)
+    syncInterval: 60,              // Seconds between sync cycles
 
-    // Connection
-    reconnectEnabled:   true,     // Reconnect on disconnect (default: true)
-    maxRetries:         null,     // Max reconnect attempts; null = unlimited (default: null)
-    probeBeforeConnect: false,    // HTTP probe before WS handshake for clearer errors (default: false)
+    // Connection (WebSocket mode)
+    reconnectEnabled:   true,
+    maxRetries:         null,
+    probeBeforeConnect: false,
 
     // Optional
-    logger: $psrLogger,           // PSR-3 LoggerInterface; defaults to stderr output
-    wsUrl:  'https://...',        // Override the default Feedple server URL
+    logger:     $psrLogger,        // PSR-3 LoggerInterface; defaults to stderr
+    runtimeDir: sys_get_temp_dir() // Directory for PID/control files
 );
 ```
 
@@ -144,15 +285,16 @@ $sdk = new FeedpleSDK(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `apiKey` | `string` | **required** | Your Feedple API key. Throws `InvalidArgumentException` if empty. |
-| `db` | `PDO` | **required** | PDO database connection. |
-| `identity` | `Identity` | **required** | Controls which tables are accessible. |
-| `autoSync` | `bool` | `true` | Periodically re-inspect and send the schema. |
+| `dbConfig` | `DbConfig` | **required** | Immutable connection config (`DbConfig::mysql()`, `pgsql()`, `sqlite()`, `raw()`). |
+| `identity` | `Identity` | **required** | Controls table access permissions and RBAC. |
+| `transport` | `string` | `'websocket'` | `'webhook'` (stateless HTTP bridge) or `'websocket'` (persistent worker daemon). |
+| `autoSync` | `bool` | `true` | Periodically re-inspect and send the schema (WebSocket mode). |
 | `syncInterval` | `int` | `60` | Seconds between schema re-sync cycles. |
-| `reconnectEnabled` | `bool` | `true` | Automatically reconnect on connection loss. |
+| `reconnectEnabled` | `bool` | `true` | Automatically reconnect on connection loss (WebSocket mode). |
 | `maxRetries` | `int\|null` | `null` | Cap on reconnect attempts. `null` means unlimited. |
-| `probeBeforeConnect` | `bool` | `false` | Perform a pre-connection HTTP probe to surface clearer server error messages (e.g. 403 bodies). |
-| `logger` | `LoggerInterface\|null` | `null` | PSR-3 logger. A stderr logger is used when `null`. |
-| `wsUrl` | `string\|null` | `null` | Override the default Feedple server endpoint URL. |
+| `probeBeforeConnect` | `bool` | `false` | Perform HTTP probe before WS handshake for clearer diagnostics. |
+| `logger` | `LoggerInterface\|null` | `null` | PSR-3 logger. A stderr/file logger is used when `null`. |
+| `runtimeDir` | `string\|null` | `sys_get_temp_dir()` | Directory for PID and worker lock files. |
 
 ---
 
@@ -191,11 +333,36 @@ $restrictedIdentity = new Identity(
 
 ## Schema Sync
 
-The SDK automatically syncs your schema on startup (after authentication) and then every `syncInterval` seconds. You can also trigger a manual sync:
+Feedple supports both one-shot HTTP schema synchronization (ideal for CI/CD, deployment commands, and webhooks) and continuous background synchronization (for WebSocket workers).
+
+### 1. One-Shot HTTP Schema Sync (`syncSchemaHttp`)
+
+In stateless webhook mode or during deployment (`php artisan feedple:sync`), inspect and push your schema via a direct HTTP POST to Feedple Cloud:
 
 ```php
-// Trigger a schema sync manually.
-// Safe to call while the event loop is running (e.g. via a signal handler).
+$result = $sdk->syncSchemaHttp(
+    apiBaseUrl: 'https://feedple-ai-614817435356.us-central1.run.app/api/v1',
+    force:      false, // Set to true to bypass local hash change detection
+    webhookUrl: 'https://myapp.com/api/feedple/bridge' // Registers webhook bridge
+);
+
+// Returns:
+// [
+//     'status'                 => 'success',
+//     'schema_version'         => 2,
+//     'skipped'                => false,
+//     'tables_count'           => 34,
+//     'registered_webhook_url' => 'https://myapp.com/api/feedple/bridge',
+//     'webhook_secret'         => 'whsec_...', // Provisioned by Feedple Cloud
+// ]
+```
+
+### 2. WebSocket Periodic Sync (`syncSchema`)
+
+In persistent WebSocket mode, the SDK automatically syncs on startup and every `syncInterval` seconds. You can also trigger a sync manually:
+
+```php
+// Trigger a schema sync manually over the active WebSocket connection.
 $sdk->syncSchema();
 ```
 
@@ -496,21 +663,73 @@ class FeedpleSDK
 {
     public function __construct(
         string            $apiKey,
-        \PDO              $db,
+        DbConfig          $dbConfig,
         Identity          $identity,
+        ?string           $autoloadPath        = null,
         bool              $autoSync            = true,
         int               $syncInterval        = 60,
         bool              $reconnectEnabled    = true,
         ?int              $maxRetries          = null,
         bool              $probeBeforeConnect  = false,
         ?LoggerInterface  $logger              = null,
-        ?string           $wsUrl               = null,
+        ?string           $runtimeDir          = null,
+        bool              $isWorkerProcess     = false,
+        ?string           $transport           = null // 'webhook' or 'websocket'
     );
 
-    public function run(): void;          // starts event loop (blocking)
-    public function syncSchema(): void;   // manually trigger schema sync
-    public function stop(): void;         // stop event loop and close connection
+    public function run(): void; // starts event loop for worker daemon (blocking)
+    public function stop(): void; // stop event loop and close connection
+    public function syncSchema(?string $webhookUrl = null): void; // sync over WebSocket
+    public function syncSchemaHttp(?string $apiBaseUrl = null, bool $force = false, ?string $webhookUrl = null): array; // HTTP one-shot sync
+    public function executeIr(array $ir): array; // validates RBAC and executes IR AST against database
+    public function getTransport(): string;
+    public function setTransport(string $transport): void;
     public function buildCompiler(): SqlCompiler; // raw SQL RBAC compiler
+}
+```
+
+### `DbConfig`
+
+```php
+namespace Feedple\Sdk;
+
+final class DbConfig implements \JsonSerializable
+{
+    public static function mysql(string $host, string $database, ?string $username = null, ?string $password = null, int $port = 3306, string $charset = 'utf8mb4', array $options = []): self;
+    public static function pgsql(string $host, string $database, ?string $username = null, ?string $password = null, int $port = 5432, array $options = []): self;
+    public static function sqlite(string $path, array $options = []): self;
+    public static function raw(string $dsn, ?string $username = null, ?string $password = null, array $options = []): self;
+
+    public function toPdo(): \PDO;
+}
+```
+
+### `WebhookBridge`
+
+```php
+namespace Feedple\Sdk\Core;
+
+class WebhookBridge
+{
+    public function __construct(FeedpleSDK $sdk, ?string $webhookSecret = null, int $tolerance = 300);
+
+    /**
+     * Verifies HMAC-SHA256 signature from X-Feedple-Signature header.
+     * Supports single or comma-separated secrets for zero-downtime rotation.
+     */
+    public static function verifySignature(
+        string $rawBody,
+        ?string $signatureHeader,
+        string|array|null $secret = null,
+        int $tolerance = 300
+    ): array; // ['valid' => bool, 'reason' => ?string, 'timestamp' => ?int]
+
+    /**
+     * Dispatches an incoming raw HTTP request.
+     * Verifies signature, validates IR, executes query, and returns structured result.
+     */
+    public function handle(string $rawBody, array $headers): array;
+    // Returns: ['status_code' => int, 'body' => array]
 }
 ```
 

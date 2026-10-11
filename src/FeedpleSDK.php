@@ -120,6 +120,8 @@ class FeedpleSDK
 
     /** @var bool */
     private $isWorkerProcess;
+    /** @var string */
+    private $transport;
 
     /**
      * @param  string   $apiKey          Feedple API key (required, non-empty).
@@ -141,6 +143,9 @@ class FeedpleSDK
      * @param  LoggerInterface|null $logger PSR-3 logger; a plain log file is used by default.
      * @param  string|null $runtimeDir   Directory for this instance's control/pid/log files.
      *                                    Defaults to sys_get_temp_dir().
+     * @param  bool     $isWorkerProcess Internal flag set only by runWorker().
+     * @param  string|null $transport    Transport mode: 'webhook' (stateless, default for web/shared hosting)
+     *                                    or 'websocket' (persistent daemon).
      *
      * @throws \InvalidArgumentException if $apiKey is empty
      * @throws \RuntimeException         if the database connection cannot be established
@@ -150,16 +155,17 @@ class FeedpleSDK
         string                     $apiKey,
         DbConfig                   $dbConfig,
         Identity                   $identity,
-        string                     $autoloadPath        = null,
+        ?string                    $autoloadPath        = null,
         bool                       $autoSync            = true,
         int                        $syncInterval        = 60,
         bool                       $reconnectEnabled    = true,
-        int                        $maxRetries          = null,
+        ?int                       $maxRetries          = null,
         bool                       $probeBeforeConnect  = false,
-        LoggerInterface            $logger              = null,
-        string                     $runtimeDir          = null,
+        ?LoggerInterface           $logger              = null,
+        ?string                    $runtimeDir          = null,
         /** @internal set only by runWorker(); skips re-spawning a child process. */
-        bool                       $isWorkerProcess     = false
+        bool                       $isWorkerProcess     = false,
+        ?string                    $transport           = null
     ) {
         $this->apiKey             = $apiKey;
         $this->dbConfig           = $dbConfig;
@@ -171,11 +177,23 @@ class FeedpleSDK
         $this->probeBeforeConnect = $probeBeforeConnect;
         $this->logger             = $logger;
         $this->isWorkerProcess    = $isWorkerProcess;
+        $this->transport          = $transport ?? getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? 'websocket');
 
         if (trim($apiKey) === '') {
             throw new \InvalidArgumentException(
                 'api_key is required. Please provide a valid Feedple API key.'
             );
+        }
+
+        $this->runtimeDir = $runtimeDir ?? sys_get_temp_dir();
+
+        $this->log('info', 'Feedple: initializing SDK...');
+
+        // ── In stateless webhook mode, defer DB connection until query execution ──
+        if ($this->transport === 'webhook') {
+            $this->db = null;
+            $this->log('info', 'Feedple: SDK initialized successfully (stateless webhook mode)');
+            return;
         }
 
         // Build our own connection from this config — used by this process,
@@ -190,10 +208,6 @@ class FeedpleSDK
                 $e
             );
         }
-
-        $this->runtimeDir = $runtimeDir ?? sys_get_temp_dir();
-
-        $this->log('info', 'Feedple: initializing SDK...');
 
         // ── Verify DB connectivity using the caller's PDO ───────────────────
         $this->verifyDbConnection();
@@ -312,6 +326,25 @@ class FeedpleSDK
             return (string) $override;
         }
         return FEEDPLE_WS_URL;
+    }
+
+    public static function getApiBaseUrl(): string
+    {
+        $override = getenv('FEEDPLE_API_BASE_URL') ?: ($_ENV['FEEDPLE_API_BASE_URL'] ?? null);
+        if (!empty($override)) {
+            return rtrim((string) $override, '/');
+        }
+        return FEEDPLE_API_BASE_URL;
+    }
+
+    public function getTransport(): string
+    {
+        return $this->transport;
+    }
+
+    public function setTransport(string $transport): void
+    {
+        $this->transport = $transport;
     }
 
     /**
@@ -480,7 +513,8 @@ class FeedpleSDK
             $config['probe_before_connect'],
             null,
             $config['runtime_dir'] ?? null,
-            true
+            true,
+            'websocket'
         );
 
         // Clean up the control file — it's only needed once, at startup.
@@ -578,14 +612,18 @@ class FeedpleSDK
 
     /**
      * Inspect the database schema, hash it, and send to Feedple if changed.
-     * Can be called either from the worker process (as part of the periodic
-     * loop) or directly from your own code — both use a connection built
-     * from the same $dbConfig.
+     * In webhook mode, uses HTTPS POST (/api/v1/tenants/schema).
+     * In websocket mode, sends via the active WebSocket connection.
      *
      * Mirrors: async def sync_schema(self) -> None
      */
-    public function syncSchema(): void
+    public function syncSchema(?string $webhookUrl = null): void
     {
+        if ($this->transport === 'webhook') {
+            $this->syncSchemaHttp(null, false, $webhookUrl);
+            return;
+        }
+
         $this->log('info', 'Feedple: inspecting database schema...');
         $this->ws?->sendInspectingStatus();
 
@@ -599,10 +637,111 @@ class FeedpleSDK
     }
 
     /**
+     * One-shot schema synchronization over HTTPS.
+     * Inspects the database, hashes the schema, and sends it to Feedple Cloud API via POST /api/v1/tenants/schema.
+     *
+     * @param  string|null $apiBaseUrl Custom API base URL (defaults to getApiBaseUrl())
+     * @param  bool $force Whether to force sync even if schema appears unchanged locally
+     * @param  string|null $webhookUrl Optional bridge webhook URL to register for autonomous queries
+     * @return array{status: string, schema_version: int, skipped: bool, tables_count: int, registered_webhook_url: ?string, webhook_secret: ?string}
+     *
+     * @throws \RuntimeException on HTTP failure or database inspection failure
+     */
+    public function syncSchemaHttp(?string $apiBaseUrl = null, bool $force = false, ?string $webhookUrl = null): array
+    {
+        $this->log('info', 'Feedple: inspecting database schema for HTTP sync...');
+        $schema = SchemaServices::getSchema($this->getDb(), $this->identity);
+        $tablesCount = count($schema);
+        $this->log('info', sprintf('Feedple: schema inspected (%d tables found)', $tablesCount));
+
+        $newHash = SchemaServices::generateSchemaHash($schema);
+        if (!$force && $this->previousHash !== null && $this->previousHash === $newHash) {
+            $this->log('info', 'Feedple: schema unchanged locally, skipping HTTP upload');
+            return [
+                'status'                 => 'success',
+                'schema_version'         => 0,
+                'skipped'                => true,
+                'tables_count'           => $tablesCount,
+                'registered_webhook_url' => null,
+                'webhook_secret'         => null,
+            ];
+        }
+
+        $baseUrl = $apiBaseUrl ?? self::getApiBaseUrl();
+        $endpoint = rtrim($baseUrl, '/') . '/tenants/schema';
+
+        $payloadData = ['schema' => $schema];
+        if ($webhookUrl !== null && $webhookUrl !== '') {
+            $payloadData['webhook_url'] = $webhookUrl;
+        }
+        $payload = json_encode($payloadData, JSON_THROW_ON_ERROR);
+
+        $headers = [
+            'Content-Type: application/json',
+            'Accept: application/json',
+            'Authorization: Bearer ' . $this->apiKey,
+            'User-Agent: Feedple-PHP-SDK/1.0',
+        ];
+
+        $ch = curl_init($endpoint);
+        curl_setopt_array($ch, [
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => $payload,
+            CURLOPT_HTTPHEADER     => $headers,
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 30,
+            CURLOPT_CONNECTTIMEOUT => 15,
+            CURLOPT_SSL_VERIFYPEER => true,
+        ]);
+
+        $responseBody = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+        curl_close($ch);
+
+        if ($responseBody === false || !empty($curlError)) {
+            $msg = "HTTP schema sync failed: " . ($curlError ?: 'unknown network error');
+            $this->log('error', "Feedple: {$msg}");
+            throw new \RuntimeException($msg);
+        }
+
+        if ($httpCode < 200 || $httpCode >= 300) {
+            $msg = "HTTP schema sync returned status {$httpCode}: {$responseBody}";
+            $this->log('error', "Feedple: {$msg}");
+            throw new \RuntimeException($msg);
+        }
+
+        $decoded = json_decode((string) $responseBody, true);
+        if (!is_array($decoded)) {
+            throw new \RuntimeException("Invalid JSON response from schema endpoint: {$responseBody}");
+        }
+
+        $this->previousHash = $newHash;
+        $this->log('info', sprintf(
+            'Feedple: schema synced via HTTP (status: %s, version: %d)',
+            $decoded['status'] ?? 'success',
+            $decoded['schema_version'] ?? 1
+        ));
+
+        return [
+            'status'                 => (string) ($decoded['status'] ?? 'success'),
+            'schema_version'         => (int) ($decoded['schema_version'] ?? 1),
+            'skipped'                => (bool) ($decoded['skipped'] ?? false),
+            'tables_count'           => (int) ($decoded['tables_count'] ?? $tablesCount),
+            'registered_webhook_url' => $decoded['registered_webhook_url'] ?? null,
+            'webhook_secret'         => $decoded['webhook_secret'] ?? null,
+        ];
+    }
+
+    /**
      * Get active database connection, automatically reconnecting if connection was lost.
      */
     private function getDb(): \PDO
     {
+        if ($this->db === null) {
+            $this->db = $this->dbConfig->toPdo();
+            return $this->db;
+        }
         try {
             $this->db->query('SELECT 1');
         } catch (\Throwable) {
@@ -711,7 +850,7 @@ class FeedpleSDK
      * @param  array<string, mixed> $ir
      * @return array{rows: list<array<string, mixed>>, count: int, duration_ms: int}
      */
-    private function executeIr(array $ir): array
+    public function executeIr(array $ir): array
     {
         $this->log('info', 'Feedple: validating IR request...');
 

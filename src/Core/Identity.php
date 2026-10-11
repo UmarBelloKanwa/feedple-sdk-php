@@ -31,7 +31,7 @@ class Identity
      * @param  bool           $allTables     When true, the identity can access every table in the database.
      */
     public function __construct(
-        string $name = null,
+        ?string $name = null,
         array  $allowedTables = [],
         bool   $allTables     = false
     ) {

@@ -60,11 +60,9 @@ class ResilienceAndReconnectionTest extends TestCase
 
         // Use reflection to schedule a reconnect timer
         $scheduleMethod = new \ReflectionMethod(FeedpleWebSocket::class, 'scheduleReconnect');
-        $scheduleMethod->setAccessible(true);
         $scheduleMethod->invoke($ws, 5.0);
 
         $timerProp = new \ReflectionProperty(FeedpleWebSocket::class, 'reconnectTimer');
-        $timerProp->setAccessible(true);
         $this->assertNotNull($timerProp->getValue($ws), 'Reconnect timer should be active');
 
         // Calling stop() must cancel and null out the timer
@@ -83,10 +81,7 @@ class ResilienceAndReconnectionTest extends TestCase
         );
 
         $scheduleMethod = new \ReflectionMethod(FeedpleWebSocket::class, 'scheduleReconnect');
-        $scheduleMethod->setAccessible(true);
-
         $timerProp = new \ReflectionProperty(FeedpleWebSocket::class, 'reconnectTimer');
-        $timerProp->setAccessible(true);
 
         // Schedule first timer
         $scheduleMethod->invoke($ws, 5.0);
@@ -119,14 +114,11 @@ class ResilienceAndReconnectionTest extends TestCase
             );
 
             $getDbMethod = new \ReflectionMethod(FeedpleSDK::class, 'getDb');
-            $getDbMethod->setAccessible(true);
-
             $initialPdo = $getDbMethod->invoke($sdk);
             $this->assertInstanceOf(\PDO::class, $initialPdo);
 
             // Intentionally replace the internal PDO handle with one pointing to a closed/invalid state
             $dbProp = new \ReflectionProperty(FeedpleSDK::class, 'db');
-            $dbProp->setAccessible(true);
 
             // We simulate a dropped connection by closing/breaking the sqlite file or nulling it
             // Let's create an in-memory SQLite and close it or replace with mock-like broken PDO
@@ -169,11 +161,9 @@ class ResilienceAndReconnectionTest extends TestCase
         );
 
         $guardianProp = new \ReflectionProperty(FeedpleWebSocket::class, 'guardianTimer');
-        $guardianProp->setAccessible(true);
         $this->assertNull($guardianProp->getValue($ws), 'Guardian timer should be null before connect()');
 
         $ensureMethod = new \ReflectionMethod(FeedpleWebSocket::class, 'ensureLoopGuardian');
-        $ensureMethod->setAccessible(true);
         $ensureMethod->invoke($ws);
 
         $this->assertNotNull($guardianProp->getValue($ws), 'Guardian timer should be initialized');
