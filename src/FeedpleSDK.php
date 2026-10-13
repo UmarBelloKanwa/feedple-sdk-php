@@ -181,7 +181,7 @@ class FeedpleSDK
         $this->probeBeforeConnect = $probeBeforeConnect;
         $this->logger             = $logger;
         $this->isWorkerProcess    = $isWorkerProcess;
-        $this->transport          = $transport ?? getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? self::DEFAULT_TRANSPORT);
+        $this->transport          = $transport ?? self::getDefaultTransport();
 
         if (trim($apiKey) === '') {
             throw new \InvalidArgumentException(
@@ -318,14 +318,135 @@ class FeedpleSDK
         @fwrite($fp, (string) getmypid());
         @fflush($fp);
 
+        @file_put_contents($this->pidFilePath(), (string) getmypid());
+
         self::$workerLockHandle = $fp;
         return true;
     }
 
+    /**
+     * Determine if the *client application* (the app embedding this SDK) is
+     * running in a development/local environment.
+     *
+     * NOTE: this is about the client app, NOT about which Feedple backend is
+     * targeted. Backend selection is controlled by FEEDPLE_DEV_ENV via
+     * {@see isDevEnv()} / {@see getApiBaseUrl()}.
+     *
+     * Checks in order:
+     * 1. APP_ENV (standard Laravel/Symfony environment: local, development, dev, test)
+     * 2. ENVIRONMENT or ENV
+     * 3. APP_URL pointing to localhost or 127.0.0.1
+     * 4. FEEDPLE_DEV_ENV (fallback for plain-PHP scripts with no APP_* vars)
+     */
+    public static function isDevelopment(): bool
+    {
+        $appEnv = getenv('APP_ENV') ?: ($_ENV['APP_ENV'] ?? null);
+        if (!empty($appEnv)) {
+            $lower = strtolower(trim((string) $appEnv));
+            if (in_array($lower, ['local', 'development', 'dev', 'testing', 'test'], true)) {
+                return true;
+            }
+            if (in_array($lower, ['production', 'prod', 'staging', 'live'], true)) {
+                return false;
+            }
+        }
+
+        $genericEnv = getenv('ENVIRONMENT') ?: ($_ENV['ENVIRONMENT'] ?? getenv('ENV') ?: ($_ENV['ENV'] ?? null));
+        if (!empty($genericEnv)) {
+            $lower = strtolower(trim((string) $genericEnv));
+            if (in_array($lower, ['local', 'development', 'dev', 'testing', 'test'], true)) {
+                return true;
+            }
+            if (in_array($lower, ['production', 'prod', 'staging', 'live'], true)) {
+                return false;
+            }
+        }
+
+        $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
+        if (!empty($appUrl) && (str_contains((string) $appUrl, 'localhost') || str_contains((string) $appUrl, '127.0.0.1'))) {
+            return true;
+        }
+
+        $override = getenv('FEEDPLE_DEV_ENV') ?: ($_ENV['FEEDPLE_DEV_ENV'] ?? null);
+        if ($override !== null && $override !== '') {
+            return filter_var($override, FILTER_VALIDATE_BOOLEAN);
+        }
+
+        return false;
+    }
+
+    /**
+     * Determine if the current application environment is production.
+     */
+    public static function isProduction(): bool
+    {
+        return !self::isDevelopment();
+    }
+
+    /**
+     * Resolve the transport mode.
+     *
+     * 1. Requested mode = FEEDPLE_TRANSPORT if set, otherwise
+     *    'websocket' in development and 'webhook' in production.
+     * 2. Reachability guard: webhook requires the Feedple backend to make an
+     *    inbound HTTP call to the app. If the app is local (APP_URL is
+     *    localhost/127.0.0.1) but the backend is remote (Cloud Run), that call
+     *    can never succeed, so the mode is forced to 'websocket' (outbound).
+     *
+     * Resulting matrix:
+     *   local app  + local backend  → webhook or websocket (your choice)
+     *   local app  + cloud backend  → websocket (forced)
+     *   public app + cloud backend  → webhook (default) or websocket
+     */
     public static function getDefaultTransport(): string
     {
-        $override = getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? null);
-        return !empty($override) ? (string) $override : self::DEFAULT_TRANSPORT;
+        $override  = getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? null);
+        $requested = !empty($override)
+            ? strtolower(trim((string) $override))
+            : (self::isDevelopment() ? 'websocket' : 'webhook');
+
+        if ($requested === 'webhook' && !self::isWebhookReachable()) {
+            return 'websocket';
+        }
+
+        return $requested;
+    }
+
+    /**
+     * Whether the Feedple backend can reach this app's webhook bridge over HTTP.
+     * False only when we positively know the app is local and the backend is remote.
+     */
+    public static function isWebhookReachable(): bool
+    {
+        return !(self::isLocalApp() && !self::isLocalBackend());
+    }
+
+    /** True when APP_URL points to a loopback / local-only host. */
+    public static function isLocalApp(): bool
+    {
+        $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
+        return !empty($appUrl) && self::isLocalUrl((string) $appUrl);
+    }
+
+    /** True when the resolved Feedple API base URL is a local server. */
+    public static function isLocalBackend(): bool
+    {
+        return self::isLocalUrl(self::getApiBaseUrl());
+    }
+
+    public static function isLocalUrl(string $url): bool
+    {
+        $host = strtolower((string) (parse_url($url, PHP_URL_HOST) ?? ''));
+        $host = trim($host, '[]');
+        if ($host === '') {
+            return false;
+        }
+        return $host === 'localhost'
+            || $host === '0.0.0.0'
+            || $host === '::1'
+            || str_starts_with($host, '127.')
+            || str_ends_with($host, '.localhost')
+            || str_ends_with($host, '.test');
     }
 
     public static function getDefaultBridgePath(): string
@@ -451,11 +572,11 @@ class FeedpleSDK
 
         $command = [PHP_BINARY, $workerScript, $controlFile];
 
-        // Redirect all standard descriptors to files/null instead of pipes,
-        // so the parent never blocks waiting to read from the child and the
-        // resource can be safely discarded right after launch.
+        // Redirect standard descriptors to files/null device instead of pipes,
+        // so the parent process exit never closes pipes or sends signals to the child.
+        $nullDevice = PHP_OS_FAMILY === 'Windows' ? 'NUL' : '/dev/null';
         $descriptorSpec = [
-            0 => ['pipe', 'r'],
+            0 => ['file', $nullDevice, 'r'],
             1 => ['file', $logFile, 'a'],
             2 => ['file', $logFile, 'a'],
         ];
@@ -466,9 +587,9 @@ class FeedpleSDK
             throw new \RuntimeException('Feedple: could not start background worker process');
         }
 
-        // We never write to the child's stdin — close it immediately so the
-        // child doesn't block waiting on input.
-        fclose($pipes[0]);
+        if (isset($pipes[0]) && is_resource($pipes[0])) {
+            fclose($pipes[0]);
+        }
 
         $status = proc_get_status($process);
         $pid    = $status['pid'] ?? null;
@@ -645,27 +766,20 @@ class FeedpleSDK
 
     /**
      * Inspect the database schema, hash it, and send to Feedple if changed.
-     * In webhook mode, uses HTTPS POST (/api/v1/tenants/schema).
-     * In websocket mode, sends via the active WebSocket connection.
+     *
+     * Schema sync ALWAYS goes over HTTP (POST /api/v1/tenants/schema), in every
+     * scenario. The transport ('webhook' | 'websocket') only governs runtime
+     * query delivery; it is reported to the backend on each sync so the
+     * backend routes queries correctly.
      *
      * Mirrors: async def sync_schema(self) -> None
      */
     public function syncSchema(?string $webhookUrl = null): void
     {
-        if ($this->transport === 'webhook') {
-            $this->syncSchemaHttp(null, false, $webhookUrl);
-            return;
-        }
-
-        $this->log('info', 'Feedple: inspecting database schema...');
         $this->ws?->sendInspectingStatus();
-
-        if ($this->loop !== null) {
-            $this->loop->addTimer(0.05, function (): void {
-                $this->doSyncSchema();
-            });
-        } else {
-            $this->doSyncSchema();
+        $result = $this->syncSchemaHttp(null, false, $webhookUrl);
+        if ($result['skipped']) {
+            $this->ws?->sendSchemaUnchanged();
         }
     }
 
@@ -703,8 +817,10 @@ class FeedpleSDK
         $baseUrl = $apiBaseUrl ?? self::getApiBaseUrl();
         $endpoint = rtrim($baseUrl, '/') . '/tenants/schema';
 
-        $payloadData = ['schema' => $schema];
-        if ($webhookUrl !== null && $webhookUrl !== '') {
+        // transport_mode tells the backend how to deliver runtime queries.
+        // In websocket mode we never register a webhook URL.
+        $payloadData = ['schema' => $schema, 'transport_mode' => $this->transport];
+        if ($this->transport === 'webhook' && $webhookUrl !== null && $webhookUrl !== '') {
             $payloadData['webhook_url'] = $webhookUrl;
         }
         $payload = json_encode($payloadData, JSON_THROW_ON_ERROR);
@@ -734,6 +850,10 @@ class FeedpleSDK
 
         if ($responseBody === false || !empty($curlError)) {
             $msg = "HTTP schema sync failed: " . ($curlError ?: 'unknown network error');
+            if (self::isLocalUrl($baseUrl)) {
+                $msg .= PHP_EOL . "  → The local Feedple server at {$baseUrl} is not reachable. Start it (e.g. `uvicorn` on port 8000),"
+                      . PHP_EOL . "    or remove FEEDPLE_DEV_ENV=true from .env to target the production Feedple Cloud.";
+            }
             $this->log('error', "Feedple: {$msg}");
             throw new \RuntimeException($msg);
         }
@@ -782,36 +902,6 @@ class FeedpleSDK
             $this->db = $this->dbConfig->toPdo();
         }
         return $this->db;
-    }
-
-    private function doSyncSchema(): void
-    {
-        try {
-            $schema = SchemaServices::getSchema($this->getDb(), $this->identity);
-
-            $this->log('info', sprintf('Feedple: schema inspected (%d tables found)', count($schema)));
-
-            $newHash = SchemaServices::generateSchemaHash($schema);
-            if ($this->previousHash !== null && $this->previousHash === $newHash) {
-                $this->log('info', 'Feedple: schema unchanged, skipping sync');
-                $this->ws?->sendSchemaUnchanged();
-                return;
-            }
-
-            if ($this->ws === null) {
-                $this->log('info', 'Feedple: skipping schema transmission (main process has no active background connection; the background worker handles this)');
-                $this->previousHash = $newHash;
-                return;
-            }
-
-            $this->log('info', 'Feedple: sending schema updates...');
-            $this->ws->sendSchema($schema);
-            $this->previousHash = $newHash;
-            $this->log('info', 'Feedple: schema sent successfully');
-        } catch (\Throwable $e) {
-            $this->log('warning', "Feedple: schema sync failed: {$e->getMessage()}");
-            $this->ws?->sendSchemaUnchanged();
-        }
     }
 
     /**

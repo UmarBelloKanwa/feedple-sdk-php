@@ -141,6 +141,91 @@ class FeedpleSdkTest extends TestCase
         }
     }
 
+    public function testTransportAutoSelectionBasedOnEnvironment(): void
+    {
+        // 1. In development (via APP_ENV=local), transport defaults to websocket
+        putenv('APP_ENV=local');
+        $_ENV['APP_ENV'] = 'local';
+        $this->assertTrue(FeedpleSDK::isDevelopment());
+        $this->assertFalse(FeedpleSDK::isProduction());
+        $this->assertEquals('websocket', FeedpleSDK::getDefaultTransport());
+
+        // 2. In development (via APP_ENV=dev or development), transport defaults to websocket
+        putenv('APP_ENV=dev');
+        $_ENV['APP_ENV'] = 'dev';
+        $this->assertTrue(FeedpleSDK::isDevelopment());
+        $this->assertEquals('websocket', FeedpleSDK::getDefaultTransport());
+
+        // 3. In production (via APP_ENV=production), transport defaults to webhook
+        putenv('APP_ENV=production');
+        $_ENV['APP_ENV'] = 'production';
+        $this->assertFalse(FeedpleSDK::isDevelopment());
+        $this->assertTrue(FeedpleSDK::isProduction());
+        $this->assertEquals('webhook', FeedpleSDK::getDefaultTransport());
+
+        // 4. In production (via APP_ENV=prod), transport defaults to webhook
+        putenv('APP_ENV=prod');
+        $_ENV['APP_ENV'] = 'prod';
+        $this->assertFalse(FeedpleSDK::isDevelopment());
+        $this->assertEquals('webhook', FeedpleSDK::getDefaultTransport());
+
+        // 5. Explicit FEEDPLE_TRANSPORT override always takes precedence
+        putenv('APP_ENV=local');
+        $_ENV['APP_ENV'] = 'local';
+        putenv('FEEDPLE_TRANSPORT=webhook');
+        $_ENV['FEEDPLE_TRANSPORT'] = 'webhook';
+        $this->assertEquals('webhook', FeedpleSDK::getDefaultTransport());
+
+        putenv('APP_ENV=production');
+        $_ENV['APP_ENV'] = 'production';
+        putenv('FEEDPLE_TRANSPORT=websocket');
+        $_ENV['FEEDPLE_TRANSPORT'] = 'websocket';
+        $this->assertEquals('websocket', FeedpleSDK::getDefaultTransport());
+
+        // Cleanup
+        putenv('APP_ENV');
+        unset($_ENV['APP_ENV']);
+        putenv('FEEDPLE_TRANSPORT');
+        unset($_ENV['FEEDPLE_TRANSPORT']);
+    }
+
+    public function testDeploymentScenarioMatrix(): void
+    {
+        $set = function (array $vars): void {
+            foreach (['APP_ENV', 'APP_URL', 'FEEDPLE_DEV_ENV', 'FEEDPLE_TRANSPORT', 'FEEDPLE_API_BASE_URL'] as $k) {
+                putenv($k);
+                unset($_ENV[$k]);
+            }
+            foreach ($vars as $k => $v) {
+                putenv("{$k}={$v}");
+                $_ENV[$k] = $v;
+            }
+        };
+
+        // 1a. Local app → local backend, webhook (reachable, honoured)
+        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_DEV_ENV' => 'true', 'FEEDPLE_TRANSPORT' => 'webhook']);
+        $this->assertSame('http://localhost:8000/api/v1', FeedpleSDK::getApiBaseUrl());
+        $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
+
+        // 1b. Local app → local backend, websocket (default in dev)
+        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_DEV_ENV' => 'true']);
+        $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
+
+        // 2. Local app → production backend: always websocket, even if webhook requested
+        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001']);
+        $this->assertStringStartsWith('https://', FeedpleSDK::getApiBaseUrl());
+        $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
+        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_TRANSPORT' => 'webhook']);
+        $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
+
+        // 3. Production app → production backend: webhook
+        $set(['APP_ENV' => 'production', 'APP_URL' => 'https://myapp.com']);
+        $this->assertStringStartsWith('https://', FeedpleSDK::getApiBaseUrl());
+        $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
+
+        $set([]);
+    }
+
     public function testConstructorAcceptsAllConnectionOptions(): void
     {
         $this->checkSqliteAvailable();
