@@ -196,7 +196,7 @@ Main orchestrator class.
 | `$logger` | `?LoggerInterface`| `null` | PSR-3 logger instance. Writes to `feedple-sdk.log` if `null`. |
 | `$runtimeDir` | `?string` | `null` | Directory for control/pid/log files (defaults to `sys_get_temp_dir()`). |
 | `$isWorkerProcess` | `bool` | `false` | Internal flag set only by worker child process. |
-| `$transport` | `?string` | `'websocket'` | `'webhook'` (stateless HTTP bridge, recommended for web) or `'websocket'` (persistent daemon). |
+| `$transport` | `?string` | `null` | Transport strategy: `'webhook'` or `'websocket'`. Defaults dynamically via `FeedpleSDK::getDefaultTransport()` (WebSocket in dev, Webhook in prod, auto-fallback for local apps). |
 
 #### Public Methods
 
@@ -224,7 +224,7 @@ Main orchestrator class.
   ```
 
 - **`syncSchema(?string $webhookUrl = null): void`**:
-  Manually triggers database schema inspection and transmits updated definitions over an active WebSocket connection.
+  Manually triggers database schema inspection and uploads definitions via HTTP POST (`/api/v1/tenants/schema`). In WebSocket mode, emits live progress frames (`schema.inspecting` and `schema.unchanged`) to the WebSocket connection.
 
 - **`stop(): void`**:
   Terminates the background worker process using cross-platform system signals (`taskkill` on Windows, `kill -TERM` on Linux/macOS) and cleans up the `.pid` file.
@@ -656,7 +656,7 @@ class FeedpleSDK
 
     public function run(): void; // starts worker event loop (blocking)
     public function stop(): void; // stops worker process
-    public function syncSchema(?string $webhookUrl = null): void; // sync over WebSocket
+    public function syncSchema(?string $webhookUrl = null): void; // HTTP schema sync with WS progress notifications
     public function syncSchemaHttp(?string $apiBaseUrl = null, bool $force = false, ?string $webhookUrl = null): array; // HTTP one-shot sync
     public function executeIr(array $ir): array; // validates RBAC and executes IR AST
     public function getTransport(): string;
@@ -664,6 +664,19 @@ class FeedpleSDK
     public function buildCompiler(): SqlCompiler;
     public function log(string $level, string $message): void;
     public static function runWorker(string $controlFilePath): void;
+
+    // Static Environment & Reachability Helpers (v1.0.18)
+    public static function getDefaultTransport(): string;
+    public static function isDevelopment(): bool;
+    public static function isProduction(): bool;
+    public static function isWebhookReachable(): bool;
+    public static function isLocalApp(): bool;
+    public static function isLocalBackend(): bool;
+    public static function isLocalUrl(string $url): bool;
+    public static function isDevEnv(): bool;
+    public static function getWsUrl(): string;
+    public static function getApiBaseUrl(): string;
+    public static function getDefaultBridgePath(): string;
 }
 ```
 

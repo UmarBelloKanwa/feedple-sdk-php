@@ -27,18 +27,23 @@ The official PHP SDK for the [Feedple AI](https://feedple.ai) platform. Connect 
 
 ## Dual-Transport Architecture
 
-Feedple provides a dual-transport architecture designed to suit both shared hosting / serverless environments and local development:
+Feedple provides an **environment-aware dual-transport architecture** designed to suit both shared hosting / serverless environments and local development:
 
 1. **Production: Stateless HTTP Webhook** (`FEEDPLE_TRANSPORT=webhook`)
-   - Optimized for shared hosting (Namecheap, cPanel, CloudLinux LVE, CageFS) and serverless (AWS Lambda / Bref).
+   - Optimized for production environments: shared hosting (Namecheap, cPanel, CloudLinux LVE, CageFS), serverless (AWS Lambda / Bref), and containerized web apps.
    - **Zero persistent processes, zero background daemons, zero ReactPHP event loops.**
    - Feedple Cloud sends cryptographically signed HTTPS POST requests (`HMAC-SHA256`) to your registered webhook endpoint (`/api/feedple/bridge`).
    - The query compiles and executes against your database within the HTTP lifecycle in ~15-30ms.
-   - Schema synchronization is performed on-demand or via one-shot cron (`php artisan feedple:sync`).
+   - Schema synchronization is performed on-demand or via one-shot command/cron (`php artisan feedple:sync`).
 
 2. **Development: Persistent WebSocket** (`FEEDPLE_TRANSPORT=websocket`)
-   - Ideal for local development or dedicated VPS where persistent long-lived background daemons are permitted.
-   - Connects outbound to `wss://...` with auto-reconnection and real-time streaming.
+   - Ideal for local development or dedicated VPS where persistent background daemons are permitted.
+   - Connects outbound to `wss://...` with auto-reconnection and real-time query execution.
+
+> [!TIP]
+> **Automatic Environment-Aware Transport (v1.0.18):**
+> If `FEEDPLE_TRANSPORT` is not explicitly set, the SDK automatically selects `'websocket'` in local development (`FeedpleSDK::isDevelopment()`) and `'webhook'` in production (`FeedpleSDK::isProduction()`).
+> Furthermore, **Reachability Guard** (`FeedpleSDK::isWebhookReachable()`): If your application is running on `localhost` (e.g. `APP_URL=http://localhost:8000`) but connecting to Feedple Cloud, the SDK automatically forces `'websocket'` mode so that queries can reach your local database via outbound socket.
 
 ---
 
@@ -194,12 +199,27 @@ Returns:
 {"status":"active","service":"Feedple Webhook Bridge","transport":"webhook","configured":true,"secret_set":true}
 ```
 
-### 3. Synchronize Schema & Auto-Register Bridge
+### 3. Laravel Artisan Commands
 
-To sync your database schema with Feedple Cloud and automatically register your bridge URL:
+The Feedple Service Provider provides Artisan commands for syncing schema and managing worker daemons:
 
 ```bash
+# 1. Synchronize schema & register webhook bridge
 php artisan feedple:sync
+
+# Options:
+#   --force                     Force schema update even if local hash matches
+#   --bridge-url=https://...    Override bridge URL (useful for tunneling in local dev)
+
+# 2. Check worker status & configured transport
+php artisan feedple:status
+
+# 3. Start background worker daemon (for WebSocket mode)
+php artisan feedple:start
+php artisan feedple:start --tail   # start and tail logs
+
+# 4. Stop background worker daemon
+php artisan feedple:stop
 ```
 
 When you run `feedple:sync`:
@@ -207,10 +227,6 @@ When you run `feedple:sync`:
 2. It auto-detects your webhook bridge URL (`APP_URL + /api/feedple/bridge`).
 3. It sends the schema to Feedple Cloud over HTTP.
 4. Feedple Cloud registers the webhook URL and provisions your `FEEDPLE_WEBHOOK_SECRET` automatically!
-
-Options:
-- `--force`: Force schema update even if the hash matches.
-- `--bridge-url=https://xyz.ngrok.io/api/feedple/bridge`: Override the registered bridge URL (useful for tunneling in local dev).
 
 ---
 
@@ -287,7 +303,7 @@ $sdk = new FeedpleSDK(
 | `apiKey` | `string` | **required** | Your Feedple API key. Throws `InvalidArgumentException` if empty. |
 | `dbConfig` | `DbConfig` | **required** | Immutable connection config (`DbConfig::mysql()`, `pgsql()`, `sqlite()`, `raw()`). |
 | `identity` | `Identity` | **required** | Controls table access permissions and RBAC. |
-| `transport` | `string` | `'websocket'` | `'webhook'` (stateless HTTP bridge) or `'websocket'` (persistent worker daemon). |
+| `transport` | `string\|null` | `null` | Transport mode: `'webhook'` or `'websocket'`. Defaults dynamically via `FeedpleSDK::getDefaultTransport()`. |
 | `autoSync` | `bool` | `true` | Periodically re-inspect and send the schema (WebSocket mode). |
 | `syncInterval` | `int` | `60` | Seconds between schema re-sync cycles. |
 | `reconnectEnabled` | `bool` | `true` | Automatically reconnect on connection loss (WebSocket mode). |
@@ -357,12 +373,18 @@ $result = $sdk->syncSchemaHttp(
 // ]
 ```
 
-### 2. WebSocket Periodic Sync (`syncSchema`)
+### 2. Continuous / WebSocket Schema Sync (`syncSchema`)
 
-In persistent WebSocket mode, the SDK automatically syncs on startup and every `syncInterval` seconds. You can also trigger a sync manually:
+In persistent WebSocket mode, the background worker automatically checks the schema on startup and every `syncInterval` seconds.
+
+> [!NOTE]
+> **HTTP Schema Synchronization (v1.0.18):**
+> In v1.0.18, schema sync **always uploads via HTTP POST (`/api/v1/tenants/schema`)** regardless of whether you are in webhook or websocket mode. In WebSocket mode, the WebSocket connection broadcasts real-time progress frames (`schema.inspecting` and `schema.unchanged`) to the Feedple dashboard, while the actual schema payload is reliably transmitted via HTTP.
+
+You can also trigger a sync manually:
 
 ```php
-// Trigger a schema sync manually over the active WebSocket connection.
+// Inspects schema, uploads via HTTP, and notifies WebSocket if active
 $sdk->syncSchema();
 ```
 
@@ -631,23 +653,29 @@ $sdk = new FeedpleSDK(
 );
 ```
 
-### Environment URLs
+### Environment URLs & Backend Target
 
-The SDK targets the **development** server (`localhost:8000`) by default. Switch to production by overriding the `wsUrl` parameter:
+By default, the SDK targets the **production Feedple Cloud** platform:
+- **API Base URL**: `https://feedple-ai-614817435356.us-central1.run.app/api/v1`
+- **WebSocket URL**: `wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws`
 
-```php
-use function Feedple\Sdk\FEEDPLE_WS_URL;
+#### Targeting Local Feedple Backend
 
-// Development (default)
-$sdk = new FeedpleSDK(apiKey: '...', db: $pdo, identity: $identity);
+If you are developing against a local Feedple AI backend (e.g. running locally on port 8000), set:
 
-// Production
-$sdk = new FeedpleSDK(
-    apiKey:  '...',
-    db:      $pdo,
-    identity: $identity,
-    wsUrl:   'wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws',
-);
+```ini
+# in your .env file
+FEEDPLE_DEV_ENV=true
+```
+
+When `FEEDPLE_DEV_ENV=true` is set:
+- **API Base URL** becomes: `http://localhost:8000/api/v1`
+- **WebSocket URL** becomes: `ws://localhost:8000/api/v1/tenants/ws`
+
+You can also explicitly override specific URLs via environment variables:
+```ini
+FEEDPLE_API_BASE_URL=https://custom-domain.com/api/v1
+FEEDPLE_WS_URL=wss://custom-domain.com/api/v1/tenants/ws
 ```
 
 ---
@@ -679,12 +707,25 @@ class FeedpleSDK
 
     public function run(): void; // starts event loop for worker daemon (blocking)
     public function stop(): void; // stop event loop and close connection
-    public function syncSchema(?string $webhookUrl = null): void; // sync over WebSocket
+    public function syncSchema(?string $webhookUrl = null): void; // HTTP schema sync with WS progress frames
     public function syncSchemaHttp(?string $apiBaseUrl = null, bool $force = false, ?string $webhookUrl = null): array; // HTTP one-shot sync
     public function executeIr(array $ir): array; // validates RBAC and executes IR AST against database
     public function getTransport(): string;
     public function setTransport(string $transport): void;
     public function buildCompiler(): SqlCompiler; // raw SQL RBAC compiler
+
+    // Static Environment & Configuration Helpers (v1.0.18)
+    public static function getDefaultTransport(): string;
+    public static function isDevelopment(): bool;
+    public static function isProduction(): bool;
+    public static function isWebhookReachable(): bool;
+    public static function isLocalApp(): bool;
+    public static function isLocalBackend(): bool;
+    public static function isLocalUrl(string $url): bool;
+    public static function isDevEnv(): bool;
+    public static function getWsUrl(): string;
+    public static function getApiBaseUrl(): string;
+    public static function getDefaultBridgePath(): string;
 }
 ```
 

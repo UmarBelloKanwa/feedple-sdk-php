@@ -74,8 +74,13 @@ FEEDPLE_API_BASE_URL=https://feedple-ai-614817435356.us-central1.run.app/api/v1
 | :--- | :--- | :--- | :--- |
 | `FEEDPLE_API_KEY` | Outbound | Sent in `Authorization: Bearer <key>` when pushing schemas or making API calls to Feedple Cloud. | `fdpl_live_...` or `sk_live_...` |
 | `FEEDPLE_WEBHOOK_SECRET` | Inbound | Used by `WebhookBridge::verifySignature()` to validate incoming `X-Feedple-Signature` HMAC headers. | `whsec_...` |
-| `FEEDPLE_TRANSPORT` | Internal | Selects transport strategy: `'webhook'` (default for web) or `'websocket'` (daemon). | `'webhook'` \| `'websocket'` |
+| `FEEDPLE_TRANSPORT` | Internal | Transport strategy: `'webhook'` (default in production) or `'websocket'` (default in dev). | `'webhook'` \| `'websocket'` |
 | `FEEDPLE_BRIDGE_PATH` | Routing | Relative path where your application mounts the webhook bridge handler. | `/api/feedple/bridge` |
+| `FEEDPLE_DEV_ENV` | Internal | When `true`, targets local backend (`http://localhost:8000`). Default `false` (targets Cloud Run). | `true` \| `false` |
+
+> [!TIP]
+> **Environment-Aware Transport & Reachability Guard (v1.0.18):**
+> When `FEEDPLE_TRANSPORT` is omitted, the SDK automatically selects `'websocket'` in local development (`isDevelopment()`) and `'webhook'` in production (`isProduction()`). If an application runs on `localhost` (e.g. `APP_URL=http://localhost:8000`) while connecting to Feedple Cloud, the SDK automatically forces `'websocket'` because Cloud Run cannot send inbound webhooks to `localhost`.
 
 ---
 
