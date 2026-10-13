@@ -28,10 +28,10 @@ use Feedple\Sdk\DbConfig;
 use Feedple\Sdk\Core\Identity;
 
 // 1. Configure database connection
-$dbConfig = DbConfig::pgsql(
+$dbConfig = DbConfig::mysql(
     host:     '127.0.0.1',
     database: 'myapp',
-    username: 'postgres',
+    username: 'root',
     password: 'secret_password',
 );
 
