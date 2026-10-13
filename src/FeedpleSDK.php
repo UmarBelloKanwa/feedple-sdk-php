@@ -17,7 +17,7 @@ use React\EventLoop\LoopInterface;
 // ── URL constants (mirrors request.py) ──────────────────────────────────────
 
 /** @internal */
-const FEEDPLE_DEV_ENV = false;
+const FEEDPLE_DEV_ENV = true;
 
 const FEEDPLE_API_BASE_URL = (FEEDPLE_DEV_ENV ? 'http://localhost:8000' : 'https://feedple-ai-614817435356.us-central1.run.app') . '/api/v1';
 const FEEDPLE_WS_URL       = (FEEDPLE_DEV_ENV ? 'ws://localhost:8000'  : 'wss://feedple-ai-614817435356.us-central1.run.app')  . '/api/v1/tenants/ws';
@@ -80,6 +80,10 @@ const FEEDPLE_WS_URL       = (FEEDPLE_DEV_ENV ? 'ws://localhost:8000'  : 'wss://
  */
 class FeedpleSDK
 {
+    public const DEFAULT_TRANSPORT = 'webhook';
+    public const DEFAULT_BRIDGE_PATH = '/api/feedple/bridge';
+    public const DEFAULT_API_BASE_URL = FEEDPLE_API_BASE_URL;
+    public const DEFAULT_WS_URL = FEEDPLE_WS_URL;
     /** @var FeedpleWebSocket|null */
     private $ws = null;
     /** @var LoopInterface|null */
@@ -177,7 +181,7 @@ class FeedpleSDK
         $this->probeBeforeConnect = $probeBeforeConnect;
         $this->logger             = $logger;
         $this->isWorkerProcess    = $isWorkerProcess;
-        $this->transport          = $transport ?? getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? 'websocket');
+        $this->transport          = $transport ?? getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? self::DEFAULT_TRANSPORT);
 
         if (trim($apiKey) === '') {
             throw new \InvalidArgumentException(
@@ -188,13 +192,6 @@ class FeedpleSDK
         $this->runtimeDir = $runtimeDir ?? sys_get_temp_dir();
 
         $this->log('info', 'Feedple: initializing SDK...');
-
-        // ── In stateless webhook mode, defer DB connection until query execution ──
-        if ($this->transport === 'webhook') {
-            $this->db = null;
-            $this->log('info', 'Feedple: SDK initialized successfully (stateless webhook mode)');
-            return;
-        }
 
         // Build our own connection from this config — used by this process,
         // and the same config is handed to the worker process so it builds
@@ -211,6 +208,12 @@ class FeedpleSDK
 
         // ── Verify DB connectivity using the caller's PDO ───────────────────
         $this->verifyDbConnection();
+
+        // ── In stateless webhook mode, return immediately without spawning worker daemon ──
+        if ($this->transport === 'webhook' && !$isWorkerProcess) {
+            $this->log('info', 'Feedple: SDK initialized successfully (stateless webhook mode)');
+            return;
+        }
 
         if ($this->autoSync) {
             $this->log('info', "Feedple: auto-sync enabled (interval: {$this->syncInterval}s)");
@@ -319,13 +322,40 @@ class FeedpleSDK
         return true;
     }
 
+    public static function getDefaultTransport(): string
+    {
+        $override = getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? null);
+        return !empty($override) ? (string) $override : self::DEFAULT_TRANSPORT;
+    }
+
+    public static function getDefaultBridgePath(): string
+    {
+        $override = getenv('FEEDPLE_BRIDGE_PATH') ?: ($_ENV['FEEDPLE_BRIDGE_PATH'] ?? null);
+        return !empty($override) ? (string) $override : self::DEFAULT_BRIDGE_PATH;
+    }
+
+    public static function isDevEnv(): bool
+    {
+        $override = getenv('FEEDPLE_DEV_ENV') ?: ($_ENV['FEEDPLE_DEV_ENV'] ?? null);
+        if ($override !== null && $override !== '') {
+            return filter_var($override, FILTER_VALIDATE_BOOLEAN);
+        }
+        if (defined('FEEDPLE_DEV_ENV')) {
+            return (bool) constant('FEEDPLE_DEV_ENV');
+        }
+        return (bool) (defined(__NAMESPACE__ . '\FEEDPLE_DEV_ENV') ? constant(__NAMESPACE__ . '\FEEDPLE_DEV_ENV') : false);
+    }
+
     public static function getWsUrl(): string
     {
         $override = getenv('FEEDPLE_WS_URL') ?: ($_ENV['FEEDPLE_WS_URL'] ?? null);
         if (!empty($override)) {
             return (string) $override;
         }
-        return FEEDPLE_WS_URL;
+        if (self::isDevEnv()) {
+            return 'ws://localhost:8000/api/v1/tenants/ws';
+        }
+        return self::DEFAULT_WS_URL;
     }
 
     public static function getApiBaseUrl(): string
@@ -334,7 +364,10 @@ class FeedpleSDK
         if (!empty($override)) {
             return rtrim((string) $override, '/');
         }
-        return FEEDPLE_API_BASE_URL;
+        if (self::isDevEnv()) {
+            return 'http://localhost:8000/api/v1';
+        }
+        return self::DEFAULT_API_BASE_URL;
     }
 
     public function getTransport(): string

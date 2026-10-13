@@ -31,7 +31,9 @@ class WebhookBridgeTest extends TestCase
 
         // Populate test table
         $pdo = $this->sdk->buildCompiler(); // test compiler access
-        $rawPdo = (new \ReflectionProperty(FeedpleSDK::class, 'db'))->getValue($this->sdk);
+        $method = new \ReflectionMethod(FeedpleSDK::class, 'getDb');
+        $method->setAccessible(true);
+        $rawPdo = $method->invoke($this->sdk);
         $rawPdo->exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);');
         $rawPdo->exec("INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');");
         $rawPdo->exec("INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com');");

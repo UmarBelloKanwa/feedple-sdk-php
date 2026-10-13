@@ -88,6 +88,59 @@ class FeedpleSdkTest extends TestCase
         $this->addToAssertionCount(1);
     }
 
+    public function testLibraryDefaultSettings(): void
+    {
+        $this->assertEquals('webhook', FeedpleSDK::DEFAULT_TRANSPORT);
+        $this->assertEquals('/api/feedple/bridge', FeedpleSDK::DEFAULT_BRIDGE_PATH);
+
+        $expectedApiUrl = \Feedple\Sdk\FEEDPLE_DEV_ENV
+            ? 'http://localhost:8000/api/v1'
+            : 'https://feedple-ai-614817435356.us-central1.run.app/api/v1';
+        $expectedWsUrl = \Feedple\Sdk\FEEDPLE_DEV_ENV
+            ? 'ws://localhost:8000/api/v1/tenants/ws'
+            : 'wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws';
+
+        $this->assertEquals($expectedApiUrl, FeedpleSDK::DEFAULT_API_BASE_URL);
+        $this->assertEquals($expectedWsUrl, FeedpleSDK::DEFAULT_WS_URL);
+        $this->assertEquals('webhook', FeedpleSDK::getDefaultTransport());
+        $this->assertEquals('/api/feedple/bridge', FeedpleSDK::getDefaultBridgePath());
+        $this->assertEquals($expectedApiUrl, FeedpleSDK::getApiBaseUrl());
+        $this->assertEquals($expectedWsUrl, FeedpleSDK::getWsUrl());
+
+        $sdk = new FeedpleSDK(
+            apiKey:   'test_api_key',
+            dbConfig: DbConfig::sqlite(':memory:'),
+            identity: new Identity(name: 'admin', allTables: true),
+        );
+        $this->assertEquals('webhook', $sdk->getTransport());
+    }
+
+    public function testDevEnvSwitchesToLocalUrls(): void
+    {
+        $orig = getenv('FEEDPLE_DEV_ENV');
+        try {
+            putenv('FEEDPLE_DEV_ENV=true');
+            $_ENV['FEEDPLE_DEV_ENV'] = 'true';
+            $this->assertTrue(FeedpleSDK::isDevEnv());
+            $this->assertEquals('http://localhost:8000/api/v1', FeedpleSDK::getApiBaseUrl());
+            $this->assertEquals('ws://localhost:8000/api/v1/tenants/ws', FeedpleSDK::getWsUrl());
+
+            putenv('FEEDPLE_DEV_ENV=false');
+            $_ENV['FEEDPLE_DEV_ENV'] = 'false';
+            $this->assertFalse(FeedpleSDK::isDevEnv());
+            $this->assertEquals('https://feedple-ai-614817435356.us-central1.run.app/api/v1', FeedpleSDK::getApiBaseUrl());
+            $this->assertEquals('wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws', FeedpleSDK::getWsUrl());
+        } finally {
+            if ($orig !== false) {
+                putenv("FEEDPLE_DEV_ENV={$orig}");
+                $_ENV['FEEDPLE_DEV_ENV'] = $orig;
+            } else {
+                putenv('FEEDPLE_DEV_ENV');
+                unset($_ENV['FEEDPLE_DEV_ENV']);
+            }
+        }
+    }
+
     public function testConstructorAcceptsAllConnectionOptions(): void
     {
         $this->checkSqliteAvailable();
