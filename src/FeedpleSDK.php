@@ -1182,7 +1182,7 @@ class FeedpleSDK
         $pidFile = $this->pidFilePath();
         $pid     = $this->workerPid ?? (is_file($pidFile) ? (int) file_get_contents($pidFile) : null);
 
-        if ($pid === null) {
+        if ($pid === null || $pid <= 0) {
             $this->log('warning', 'Feedple: no known worker PID to stop');
             return;
         }

@@ -88,52 +88,30 @@ FEEDPLE_API_BASE_URL=https://feedple-ai-614817435356.us-central1.run.app/api/v1
 
 ### Pattern 1: Laravel Integration (Zero-Config Autonomous Bridge)
 
-For Laravel applications, use `feedple-examples/php/laravel` or register the `FeedpleServiceProvider`.
+The Feedple PHP SDK includes built-in **Laravel Package Discovery**. Simply install the package and provide your credentials.
 
-#### Step 1: Install Package & Add Configuration
+#### Step 1: Install Package
 
-Add your environment variables to `.env`:
+```bash
+composer require feedple/feedple-sdk
+```
+
+#### Step 2: Add API Key in `.env`
 
 ```ini
 FEEDPLE_API_KEY=fdpl_live_your_actual_api_key
-FEEDPLE_WEBHOOK_SECRET=whsec_your_webhook_signing_secret
-FEEDPLE_TRANSPORT=webhook
-FEEDPLE_BRIDGE_PATH=/api/feedple/bridge
 ```
 
-Publish configuration (`config/feedple.php`):
+Laravel automatically discovers and boots `Feedple\Sdk\Laravel\FeedpleServiceProvider`.
+- Mounts `POST /api/feedple/bridge` and `GET /api/feedple/bridge`
+- Auto-exempts CSRF verification on the bridge route
+- Automatically auto-boots the background WebSocket worker on `php artisan serve` in development
+- Automatically detects database settings from Laravel's `config/database.php`
 
-```php
-<?php
-
-return [
-    'api_key'        => env('FEEDPLE_API_KEY'),
-    'webhook_secret' => env('FEEDPLE_WEBHOOK_SECRET'),
-    'transport'      => env('FEEDPLE_TRANSPORT', 'webhook'),
-    'bridge_path'    => env('FEEDPLE_BRIDGE_PATH', '/api/feedple/bridge'),
-    'api_base_url'   => env('FEEDPLE_API_BASE_URL', 'https://feedple-ai-614817435356.us-central1.run.app/api/v1'),
-];
+*(Optional) Publish configuration file:*
+```bash
+php artisan vendor:publish --tag=feedple-config
 ```
-
-#### Step 2: Register Service Provider
-
-In `bootstrap/providers.php` (Laravel 11+) or `config/app.php` (Laravel 10 and below):
-
-```php
-App\Providers\FeedpleServiceProvider::class,
-```
-
-The Service Provider automatically:
-1. Registers `POST /api/feedple/bridge` for query execution.
-2. Registers `GET /api/feedple/bridge` for reachability health checks.
-3. Automatically exempts the bridge route from CSRF verification in `bootstrap/app.php`:
-   ```php
-   ->withMiddleware(function (Middleware $middleware) {
-       $middleware->validateCsrfTokens(except: [
-           'api/feedple/bridge',
-       ]);
-   })
-   ```
 
 #### Step 3: Synchronize Schema & Auto-Register Bridge
 

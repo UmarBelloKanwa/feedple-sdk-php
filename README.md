@@ -159,18 +159,25 @@ $sdk->syncSchema();
 
 ---
 
-## Laravel Integration
+## Laravel Integration (Zero-Config Auto-Discovery)
 
-In Laravel apps, install the SDK and configure `.env`:
+The SDK automatically registers the service provider via **Laravel Package Discovery**. No manual registration in `bootstrap/app.php` or `config/app.php` is needed!
 
+1. Install the SDK:
+```bash
+composer require feedple/feedple-sdk
+```
+
+2. Add your Feedple API Key to `.env`:
 ```ini
-# Required:
 FEEDPLE_API_KEY=fdpl_live_your_actual_api_key
+```
 
-# Optional (auto-detected in production):
-# FEEDPLE_TRANSPORT=webhook       # Auto-detected ('webhook' in prod, 'websocket' in dev)
-# FEEDPLE_WEBHOOK_SECRET=whsec_... # Auto-retrieved & cached from Feedple Cloud via API key
-# FEEDPLE_BRIDGE_PATH=/api/feedple/bridge
+When you start your development server (`php artisan serve`), the Feedple background worker daemon starts automatically in < 5ms without blocking.
+
+*(Optional) Publish the configuration file if you wish to customize options:*
+```bash
+php artisan vendor:publish --tag=feedple-config
 ```
 
 ### Artisan Commands
