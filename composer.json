@@ -32,6 +32,16 @@
             "Feedple\\Sdk\\Tests\\": "tests/"
         }
     },
+    "suggest": {
+        "illuminate/support": "Required to use the Laravel Service Provider (^9.0 || ^10.0 || ^11.0 || ^12.0)."
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Feedple\\Sdk\\Laravel\\FeedpleServiceProvider"
+            ]
+        }
+    },
     "config": {
         "sort-packages": true
     },
