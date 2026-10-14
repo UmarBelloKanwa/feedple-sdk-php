@@ -128,6 +128,10 @@ class FeedpleSDK
     private $transport;
     /** @var string|null */
     private $webhookSecret = null;
+    /** @var bool */
+    private $verifySsl = true;
+    /** @var string|null */
+    private $caBundlePath = null;
 
     /**
      * @param  string   $apiKey          Feedple API key (required, non-empty).
@@ -153,6 +157,8 @@ class FeedpleSDK
      * @param  string|null $transport    Transport mode: 'webhook' (stateless, default for web/shared hosting)
      *                                    or 'websocket' (persistent daemon).
      * @param  string|null $webhookSecret Webhook signing secret (optional; auto-fetched/cached).
+     * @param  bool|null   $verifySsl    Whether to verify SSL certificates (default: true, set false via FEEDPLE_VERIFY_SSL=false).
+     * @param  string|null $caBundlePath Custom CA bundle path (optional; auto-resolves if omitted).
      *
      * @throws \InvalidArgumentException if $apiKey is empty
      * @throws \RuntimeException         if the database connection cannot be established
@@ -173,7 +179,9 @@ class FeedpleSDK
         /** @internal set only by runWorker(); skips re-spawning a child process. */
         bool                       $isWorkerProcess     = false,
         ?string                    $transport           = null,
-        ?string                    $webhookSecret       = null
+        ?string                    $webhookSecret       = null,
+        ?bool                      $verifySsl           = null,
+        ?string                    $caBundlePath        = null
     ) {
         $this->apiKey             = $apiKey;
         $this->dbConfig           = $dbConfig;
@@ -187,6 +195,8 @@ class FeedpleSDK
         $this->isWorkerProcess    = $isWorkerProcess;
         $this->transport          = $transport ?? self::getDefaultTransport();
         $this->webhookSecret      = $webhookSecret;
+        $this->verifySsl          = $verifySsl ?? self::isSslVerificationEnabled();
+        $this->caBundlePath       = $caBundlePath ?? self::resolveCaBundle();
 
         if (trim($apiKey) === '') {
             throw new \InvalidArgumentException(
@@ -592,6 +602,103 @@ class FeedpleSDK
     }
 
     /**
+     * Resolves the best available Certificate Authority (CA) root bundle path.
+     * Checks custom bundle, php.ini settings, Composer CaBundle, bundled resources/cacert.pem,
+     * and common OS certificate stores.
+     */
+    public static function resolveCaBundle(?string $customPath = null): ?string
+    {
+        // 1. Explicit path parameter or FEEDPLE_CA_BUNDLE environment variable
+        $configuredPath = $customPath
+            ?? getenv('FEEDPLE_CA_BUNDLE')
+            ?: ($_ENV['FEEDPLE_CA_BUNDLE'] ?? null);
+
+        if (!empty($configuredPath) && file_exists((string) $configuredPath)) {
+            return (string) $configuredPath;
+        }
+
+        // 2. Check if php.ini already specifies a valid curl.cainfo
+        $curlCainfo = ini_get('curl.cainfo');
+        if (!empty($curlCainfo) && file_exists($curlCainfo)) {
+            return $curlCainfo;
+        }
+
+        // 3. Check if php.ini already specifies a valid openssl.cafile
+        $opensslCafile = ini_get('openssl.cafile');
+        if (!empty($opensslCafile) && file_exists($opensslCafile)) {
+            return $opensslCafile;
+        }
+
+        // 4. Check if Composer\CaBundle\CaBundle is installed (very common in Composer/Laravel projects)
+        if (class_exists('Composer\CaBundle\CaBundle')) {
+            try {
+                $composerBundle = \Composer\CaBundle\CaBundle::getSystemCaRootBundlePath();
+                if (!empty($composerBundle) && file_exists($composerBundle)) {
+                    return $composerBundle;
+                }
+            } catch (\Throwable) {
+                // Ignore and fall through
+            }
+        }
+
+        // 5. Check bundled resources/cacert.pem in our own package
+        $bundledPem = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'resources' . DIRECTORY_SEPARATOR . 'cacert.pem';
+        if (file_exists($bundledPem)) {
+            return $bundledPem;
+        }
+
+        // 6. Common OS certificate bundles on Linux/BSD/macOS
+        $commonPaths = [
+            '/etc/ssl/certs/ca-certificates.crt', // Debian, Ubuntu, Alpine
+            '/etc/pki/tls/certs/ca-bundle.crt', // RHEL, CentOS, Fedora
+            '/etc/ssl/ca-bundle.pem', // OpenSUSE
+            '/etc/pki/tls/cacert.pem', // OpenELEC
+            '/etc/ssl/cert.pem', // macOS, FreeBSD, OpenBSD
+            '/usr/local/share/certs/ca-root-nss.crt', // FreeBSD
+        ];
+
+        foreach ($commonPaths as $path) {
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Determine whether SSL peer verification is enabled.
+     * Returns false if FEEDPLE_VERIFY_SSL is set to 'false' or '0'.
+     */
+    public static function isSslVerificationEnabled(): bool
+    {
+        $val = getenv('FEEDPLE_VERIFY_SSL');
+        if ($val === false || $val === null || $val === '') {
+            $val = $_ENV['FEEDPLE_VERIFY_SSL'] ?? null;
+        }
+        if ($val !== null && ($val === 'false' || $val === '0' || $val === false)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Returns whether SSL certificate verification is enabled for this instance.
+     */
+    public function isSslVerified(): bool
+    {
+        return $this->verifySsl;
+    }
+
+    /**
+     * Returns the CA bundle file path used for SSL certificate verification, if resolved.
+     */
+    public function getCaBundlePath(): ?string
+    {
+        return $this->caBundlePath;
+    }
+
+    /**
      * Get the directory where runtime cache and lock files live.
      */
     public function getRuntimeDir(): string
@@ -658,7 +765,7 @@ class FeedpleSDK
         $endpoint = rtrim($baseUrl, '/') . '/tenants/webhook/secret';
 
         $ch = curl_init($endpoint);
-        curl_setopt_array($ch, [
+        $curlOptions = [
             CURLOPT_HTTPGET        => true,
             CURLOPT_HTTPHEADER     => [
                 'Authorization: Bearer ' . $this->apiKey,
@@ -667,11 +774,19 @@ class FeedpleSDK
             ],
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 10,
-            CURLOPT_SSL_VERIFYPEER => true,
-        ]);
+            CURLOPT_SSL_VERIFYPEER => $this->verifySsl,
+            CURLOPT_SSL_VERIFYHOST => $this->verifySsl ? 2 : 0,
+        ];
+
+        if ($this->verifySsl && !empty($this->caBundlePath)) {
+            $curlOptions[CURLOPT_CAINFO] = $this->caBundlePath;
+        }
+
+        curl_setopt_array($ch, $curlOptions);
 
         $body = curl_exec($ch);
         $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
         curl_close($ch);
 
         if ($code >= 200 && $code < 300 && !empty($body)) {
@@ -680,6 +795,8 @@ class FeedpleSDK
                 $this->saveWebhookSecret((string) $data['webhook_secret']);
                 return $this->webhookSecret;
             }
+        } elseif (!empty($curlError)) {
+            $this->log('warning', "Feedple: failed to fetch webhook secret: {$curlError}");
         }
 
         return null;
@@ -754,7 +871,9 @@ class FeedpleSDK
             self::getWsUrl(),
             $this->apiKey,
             $this->loop,
-            $this->buildLogger()
+            $this->buildLogger(),
+            $this->verifySsl,
+            $this->caBundlePath
         );
         $this->ws->reconnectEnabled   = $this->reconnectEnabled;
         $this->ws->maxRetries         = $this->maxRetries;
@@ -796,6 +915,8 @@ class FeedpleSDK
             'probe_before_connect' => $this->probeBeforeConnect,
             'log_path'             => $logFile,
             'runtime_dir'          => $this->runtimeDir,
+            'verify_ssl'           => $this->verifySsl,
+            'ca_bundle_path'       => $this->caBundlePath,
         ];
 
         // Control file contains DB credentials in plaintext JSON — it's
@@ -909,7 +1030,10 @@ class FeedpleSDK
             null,
             $config['runtime_dir'] ?? null,
             true,
-            'websocket'
+            'websocket',
+            null,
+            $config['verify_ssl'] ?? null,
+            $config['ca_bundle_path'] ?? null
         );
 
         // Clean up the control file — it's only needed once, at startup.
@@ -1078,19 +1202,27 @@ class FeedpleSDK
         ];
 
         $ch = curl_init($endpoint);
-        curl_setopt_array($ch, [
+        $curlOptions = [
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $payload,
             CURLOPT_HTTPHEADER     => $headers,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 30,
             CURLOPT_CONNECTTIMEOUT => 15,
-            CURLOPT_SSL_VERIFYPEER => true,
-        ]);
+            CURLOPT_SSL_VERIFYPEER => $this->verifySsl,
+            CURLOPT_SSL_VERIFYHOST => $this->verifySsl ? 2 : 0,
+        ];
+
+        if ($this->verifySsl && !empty($this->caBundlePath)) {
+            $curlOptions[CURLOPT_CAINFO] = $this->caBundlePath;
+        }
+
+        curl_setopt_array($ch, $curlOptions);
 
         $responseBody = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curlError = curl_error($ch);
+        $curlErrno = curl_errno($ch);
         curl_close($ch);
 
         if ($responseBody === false || !empty($curlError)) {
@@ -1098,6 +1230,13 @@ class FeedpleSDK
             if (self::isLocalUrl($baseUrl)) {
                 $msg .= PHP_EOL . "  → The local Feedple server at {$baseUrl} is not reachable. Start it (e.g. `uvicorn` on port 8000),"
                       . PHP_EOL . "    or remove FEEDPLE_DEV_ENV=true from .env to target the production Feedple Cloud.";
+            } elseif ($curlErrno === 60 || $curlErrno === 77 || stripos($curlError, 'certificate') !== false || stripos($curlError, 'local issuer certificate') !== false) {
+                $msg .= PHP_EOL . "  → SSL Certificate Verification Issue:"
+                      . PHP_EOL . "    Your PHP environment (especially common on Windows Apache / XAMPP) cannot verify the SSL certificate."
+                      . PHP_EOL . "    Fix options:"
+                      . PHP_EOL . "    1. Set `FEEDPLE_VERIFY_SSL=false` in your .env for local testing."
+                      . PHP_EOL . "    2. Set `curl.cainfo = \"C:\\path\\to\\cacert.pem\"` in your php.ini."
+                      . PHP_EOL . "    3. Specify `FEEDPLE_CA_BUNDLE=\"C:\\path\\to\\cacert.pem\"` in your .env.";
             }
             $this->log('error', "Feedple: {$msg}");
             throw new \RuntimeException($msg);

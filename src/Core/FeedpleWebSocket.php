@@ -12,6 +12,7 @@ use React\EventLoop\LoopInterface;
 use React\EventLoop\Loop;
 use React\EventLoop\TimerInterface;
 use React\Promise\Deferred;
+use React\Socket\Connector as SocketConnector;
 
 /**
  * Persistent WebSocket client for the Feedple AI platform.
@@ -86,17 +87,23 @@ class FeedpleWebSocket
     private $apiKey;
     private $loop;
     private $logger;
+    private bool $verifySsl;
+    private ?string $caBundle;
 
     public function __construct(
         string          $wsUrl,
         string          $apiKey,
         LoopInterface   $loop,
-        LoggerInterface $logger
+        LoggerInterface $logger,
+        bool            $verifySsl = true,
+        ?string         $caBundle  = null
     ) {
-        $this->wsUrl  = $wsUrl;
-        $this->apiKey = $apiKey;
-        $this->loop   = $loop;
-        $this->logger = $logger;
+        $this->wsUrl     = $wsUrl;
+        $this->apiKey    = $apiKey;
+        $this->loop      = $loop;
+        $this->logger    = $logger;
+        $this->verifySsl = $verifySsl;
+        $this->caBundle  = $caBundle;
     }
 
     /**
@@ -234,7 +241,24 @@ class FeedpleWebSocket
             }
         }
 
-        $this->connector ??= new Connector($this->loop);
+        if ($this->connector === null) {
+            $socketOptions = [
+                'timeout' => 20,
+            ];
+            $tlsOptions = [
+                'verify_peer'      => $this->verifySsl,
+                'verify_peer_name' => $this->verifySsl,
+            ];
+            if ($this->verifySsl && !empty($this->caBundle)) {
+                $tlsOptions['cafile'] = $this->caBundle;
+            }
+            $socketOptions['tls'] = $tlsOptions;
+
+            $this->connector = new Connector(
+                $this->loop,
+                new SocketConnector($socketOptions, $this->loop)
+            );
+        }
         $connector = $this->connector;
 
         $connected = false;
@@ -766,13 +790,22 @@ class FeedpleWebSocket
             $url = $this->wsUrl;
         }
 
-        $context = stream_context_create([
+        $contextOptions = [
             'http' => [
                 'method'  => 'GET',
                 'timeout' => $timeout,
                 'ignore_errors' => true,
             ],
-        ]);
+            'ssl' => [
+                'verify_peer'      => $this->verifySsl,
+                'verify_peer_name' => $this->verifySsl,
+            ],
+        ];
+        if ($this->verifySsl && !empty($this->caBundle)) {
+            $contextOptions['ssl']['cafile'] = $this->caBundle;
+        }
+
+        $context = stream_context_create($contextOptions);
 
         $body     = @file_get_contents($url, context: $context);
         $headers  = $http_response_header ?? [];

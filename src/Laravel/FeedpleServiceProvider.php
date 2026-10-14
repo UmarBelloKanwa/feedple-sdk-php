@@ -205,11 +205,19 @@ class FeedpleServiceProvider extends ServiceProvider
             ?? config('feedple.transport')
             ?? FeedpleSDK::getDefaultTransport();
 
+        $verifySsl = config('feedple.verify_ssl');
+        if ($verifySsl === null) {
+            $verifySsl = FeedpleSDK::isSslVerificationEnabled();
+        }
+        $caBundle = config('feedple.ca_bundle') ?? FeedpleSDK::resolveCaBundle();
+
         return static::$cachedSdk = new FeedpleSDK(
             apiKey: $apiKey,
             dbConfig: $dbConfig,
             identity: $identity,
-            transport: $selectedTransport
+            transport: $selectedTransport,
+            verifySsl: (bool) $verifySsl,
+            caBundlePath: $caBundle
         );
     }
 

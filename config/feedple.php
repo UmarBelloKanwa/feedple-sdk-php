@@ -63,4 +63,20 @@ return [
     |
     */
     'api_base_url' => env('FEEDPLE_API_BASE_URL', FeedpleSDK::getApiBaseUrl()),
+
+    /*
+    |--------------------------------------------------------------------------
+    | SSL Peer Verification & Root CA Bundle
+    |--------------------------------------------------------------------------
+    |
+    | Whether to verify SSL certificates when communicating with Feedple Cloud.
+    | Set to false in local development if running on Windows (Apache/XAMPP)
+    | without curl.cainfo configured.
+    |
+    | Optional custom CA root bundle path (FEEDPLE_CA_BUNDLE). If omitted, the SDK
+    | auto-detects system stores and uses its bundled Mozilla CA bundle.
+    |
+    */
+    'verify_ssl' => env('FEEDPLE_VERIFY_SSL', true),
+    'ca_bundle'  => env('FEEDPLE_CA_BUNDLE'),
 ];
