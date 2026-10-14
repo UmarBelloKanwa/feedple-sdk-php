@@ -63,7 +63,7 @@ echo -e "\033[36m>>> composer validate\033[0m"
 composer validate
 
 # Commit release changes if any.
-git add composer.json composer.lock
+git add -A
 
 if git diff --cached --quiet; then
     echo "No Composer changes staged. Creating the release from the current commit."
