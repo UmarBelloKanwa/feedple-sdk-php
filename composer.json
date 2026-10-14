@@ -42,6 +42,9 @@
             ]
         }
     },
+    "bin": [
+        "bin/feedple"
+    ],
     "config": {
         "sort-packages": true
     },

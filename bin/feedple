@@ -1,0 +1,281 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Locate Composer autoloader
+$autoloaderPaths = [
+    getcwd() . '/vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+    __DIR__ . '/../vendor/autoload.php',
+];
+
+$loaded = false;
+foreach ($autoloaderPaths as $path) {
+    if (file_exists($path)) {
+        require_once $path;
+        $loaded = true;
+        break;
+    }
+}
+
+if (!$loaded) {
+    fwrite(STDERR, "Error: Could not locate vendor/autoload.php. Run 'composer install' first.\n");
+    exit(1);
+}
+
+use Feedple\Sdk\DbConfig;
+use Feedple\Sdk\FeedpleSDK;
+use Feedple\Sdk\Core\Identity;
+use Feedple\Sdk\Laravel\FeedpleServiceProvider;
+
+// Load .env file if available in the current working directory
+$envFile = getcwd() . '/.env';
+if (file_exists($envFile)) {
+    $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || str_starts_with($line, '#')) {
+            continue;
+        }
+        if (str_contains($line, '=')) {
+            [$key, $val] = explode('=', $line, 2);
+            $key = trim($key);
+            $val = trim($val);
+            if ((str_starts_with($val, '"') && str_ends_with($val, '"')) ||
+                (str_starts_with($val, "'") && str_ends_with($val, "'"))) {
+                $val = substr($val, 1, -1);
+            }
+            if (getenv($key) === false && !isset($_ENV[$key])) {
+                putenv("{$key}={$val}");
+                $_ENV[$key] = $val;
+            }
+        }
+    }
+}
+
+function getSdkInstance(?string $transport = null): ?FeedpleSDK
+{
+    // If running in a Laravel application, bootstrap via service provider
+    $laravelBootstrap = getcwd() . '/bootstrap/app.php';
+    if (file_exists($laravelBootstrap) && class_exists(FeedpleServiceProvider::class)) {
+        try {
+            $app = require_once $laravelBootstrap;
+            if ($app instanceof Illuminate\Contracts\Foundation\Application) {
+                if (method_exists($app, 'make') && class_exists(Illuminate\Contracts\Console\Kernel::class)) {
+                    $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
+                    $kernel->bootstrap();
+                }
+                return FeedpleServiceProvider::makeSdk($transport);
+            }
+        } catch (\Throwable) {
+            // Fall through to standalone resolution
+        }
+    }
+
+    $apiKey = getenv('FEEDPLE_API_KEY') ?: ($_ENV['FEEDPLE_API_KEY'] ?? null);
+    if (!$apiKey) {
+        return null;
+    }
+
+    $driver = strtolower((string) (getenv('DB_CONNECTION') ?: ($_ENV['DB_CONNECTION'] ?? 'mysql')));
+    if ($driver === 'pgsql' || $driver === 'postgres') {
+        $dbConfig = DbConfig::pgsql(
+            host: getenv('DB_HOST') ?: ($_ENV['DB_HOST'] ?? '127.0.0.1'),
+            database: getenv('DB_DATABASE') ?: ($_ENV['DB_DATABASE'] ?? 'postgres'),
+            username: getenv('DB_USERNAME') ?: ($_ENV['DB_USERNAME'] ?? 'postgres'),
+            password: getenv('DB_PASSWORD') ?: ($_ENV['DB_PASSWORD'] ?? ''),
+            port: (int) (getenv('DB_PORT') ?: ($_ENV['DB_PORT'] ?? 5432))
+        );
+    } elseif ($driver === 'sqlite') {
+        $dbPath = getenv('DB_DATABASE') ?: ($_ENV['DB_DATABASE'] ?? 'database.sqlite');
+        $dbConfig = DbConfig::sqlite($dbPath);
+    } else {
+        $dbConfig = DbConfig::mysql(
+            host: getenv('DB_HOST') ?: ($_ENV['DB_HOST'] ?? '127.0.0.1'),
+            database: getenv('DB_DATABASE') ?: ($_ENV['DB_DATABASE'] ?? 'laravel'),
+            username: getenv('DB_USERNAME') ?: ($_ENV['DB_USERNAME'] ?? 'root'),
+            password: getenv('DB_PASSWORD') ?: ($_ENV['DB_PASSWORD'] ?? ''),
+            port: (int) (getenv('DB_PORT') ?: ($_ENV['DB_PORT'] ?? 3306))
+        );
+    }
+
+    $identity = new Identity(name: 'standalone-app', allTables: true);
+
+    return new FeedpleSDK(
+        apiKey: $apiKey,
+        dbConfig: $dbConfig,
+        identity: $identity,
+        transport: $transport ?? FeedpleSDK::getDefaultTransport()
+    );
+}
+
+$action = $argv[1] ?? 'help';
+
+switch ($action) {
+    case 'start':
+        $tail = in_array('--tail', $argv, true);
+        echo "Initializing Feedple SDK in WebSocket mode...\n";
+        try {
+            $sdk = getSdkInstance('websocket');
+            if (!$sdk) {
+                fwrite(STDERR, "Error: FEEDPLE_API_KEY is not configured in .env file.\n");
+                exit(1);
+            }
+            echo "Feedple worker started (or already active).\n";
+            $logFile = sys_get_temp_dir() . '/feedple-sdk.log';
+            echo "Log File: {$logFile}\n";
+
+            if ($tail) {
+                if (!file_exists($logFile)) {
+                    touch($logFile);
+                }
+                echo "Tailing {$logFile} (Press Ctrl+C to stop)...\n";
+                passthru("tail -f " . escapeshellarg($logFile));
+            }
+        } catch (\Throwable $e) {
+            fwrite(STDERR, "Error: Failed to start Feedple worker: {$e->getMessage()}\n");
+            exit(1);
+        }
+        break;
+
+    case 'stop':
+        $tempDir = sys_get_temp_dir();
+        $pidFile = $tempDir . '/feedple-sdk.pid';
+        if (!file_exists($pidFile)) {
+            echo "No Feedple worker PID file found ({$pidFile}). Worker is not running.\n";
+            exit(0);
+        }
+
+        $pid = (int) trim((string) file_get_contents($pidFile));
+        echo "Stopping Feedple background worker (PID: {$pid})...\n";
+
+        if ($pid > 0) {
+            if (PHP_OS_FAMILY === 'Windows') {
+                exec(sprintf('taskkill /F /T /PID %d 2>NUL', $pid));
+            } else {
+                exec(sprintf('kill -TERM %d 2>/dev/null', $pid));
+            }
+        }
+
+        @unlink($pidFile);
+        @unlink($tempDir . '/feedple-sdk.lock');
+        echo "Feedple background worker stopped.\n";
+        break;
+
+    case 'status':
+        echo "--- Feedple Worker Status ---\n";
+        $apiKey = getenv('FEEDPLE_API_KEY') ?: ($_ENV['FEEDPLE_API_KEY'] ?? null);
+        if (!$apiKey) {
+            echo "API Key: Not configured in .env\n";
+        } else {
+            $masked = substr((string) $apiKey, 0, 7) . '...' . substr((string) $apiKey, -4);
+            echo "API Key: {$masked}\n";
+        }
+
+        $transport = getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? FeedpleSDK::getDefaultTransport());
+        echo "Configured Transport: {$transport}\n";
+
+        $dbConn = getenv('DB_CONNECTION') ?: ($_ENV['DB_CONNECTION'] ?? 'mysql');
+        echo "Database Connection: {$dbConn}\n";
+
+        $tempDir = sys_get_temp_dir();
+        $pidFile = $tempDir . '/feedple-sdk.pid';
+        $logFile = $tempDir . '/feedple-sdk.log';
+
+        $isRunning = false;
+        $pid = null;
+
+        if (file_exists($pidFile)) {
+            $pid = (int) trim((string) file_get_contents($pidFile));
+            if ($pid > 0) {
+                if (PHP_OS_FAMILY === 'Windows') {
+                    $out = shell_exec(sprintf('tasklist /FI "PID eq %d" 2>NUL', $pid));
+                    $isRunning = $out !== null && str_contains($out, (string) $pid);
+                } else {
+                    exec(sprintf('kill -0 %d 2>/dev/null', $pid), result_code: $exitCode);
+                    $isRunning = ($exitCode === 0);
+                }
+            }
+        }
+
+        if ($transport === 'webhook') {
+            $bridgePath = getenv('FEEDPLE_BRIDGE_PATH') ?: ($_ENV['FEEDPLE_BRIDGE_PATH'] ?? FeedpleSDK::DEFAULT_BRIDGE_PATH);
+            $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? '');
+            $bridgeUrl = !empty($appUrl) ? rtrim($appUrl, '/') . '/' . ltrim($bridgePath, '/') : $bridgePath;
+            echo "Bridge Status: ACTIVE (Stateless HTTP endpoint: {$bridgeUrl})\n";
+            echo "  → No background daemon required in Webhook mode.\n";
+        } else {
+            if ($isRunning && $pid) {
+                echo "Worker Status: RUNNING (PID: {$pid})\n";
+            } else {
+                echo "Worker Status: STOPPED (Start it with: feedple start)\n";
+            }
+        }
+
+        echo "Log File: {$logFile}\n";
+
+        $lines = 15;
+        foreach ($argv as $arg) {
+            if (str_starts_with($arg, '--lines=')) {
+                $lines = max(1, (int) substr($arg, 8));
+            }
+        }
+
+        if (file_exists($logFile)) {
+            echo "Recent Logs (last {$lines} lines):\n";
+            $content = file($logFile);
+            if ($content !== false && count($content) > 0) {
+                $slice = array_slice($content, -$lines);
+                foreach ($slice as $logLine) {
+                    echo $logLine;
+                }
+            } else {
+                echo "  (log file is empty)\n";
+            }
+        } else {
+            echo "  (no log file found yet)\n";
+        }
+        break;
+
+    case 'sync':
+        $force = in_array('--force', $argv, true);
+        echo "Starting Feedple schema synchronization...\n";
+        try {
+            $sdk = getSdkInstance('webhook');
+            if (!$sdk) {
+                fwrite(STDERR, "Error: FEEDPLE_API_KEY is not configured in .env file.\n");
+                exit(1);
+            }
+            $result = $sdk->syncSchemaHttp(null, $force);
+            $status = $result['status'] ?? 'success';
+            $tables = $result['tables_count'] ?? 0;
+            $skipped = !empty($result['skipped']) ? ' (unchanged, skipped upload)' : '';
+            echo "Schema sync completed: status={$status}, tables={$tables}{$skipped}\n";
+        } catch (\Throwable $e) {
+            fwrite(STDERR, "Error: Schema sync failed: {$e->getMessage()}\n");
+            exit(1);
+        }
+        break;
+
+    case '--help':
+    case '-h':
+    case 'help':
+    default:
+        echo "Feedple CLI — Official Command-Line Interface for the Feedple PHP SDK\n\n";
+        echo "Usage:\n";
+        echo "  feedple <command> [options]\n\n";
+        echo "Commands:\n";
+        echo "  start [--tail]        Start the background worker daemon in WebSocket mode\n";
+        echo "  stop                  Stop the running background worker daemon\n";
+        echo "  status [--lines=15]   Display the worker process status and view recent logs\n";
+        echo "  sync [--force]        Synchronize database schema with Feedple Cloud\n";
+        echo "  help                  Display this help message\n\n";
+        echo "Laravel Integration:\n";
+        echo "  In Laravel projects, native Artisan commands are also available:\n";
+        echo "  php artisan feedple:start [--tail]\n";
+        echo "  php artisan feedple:stop\n";
+        echo "  php artisan feedple:status\n";
+        echo "  php artisan feedple:sync [--force]\n";
+        break;
+}
