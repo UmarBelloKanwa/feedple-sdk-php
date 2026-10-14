@@ -126,6 +126,8 @@ class FeedpleSDK
     private $isWorkerProcess;
     /** @var string */
     private $transport;
+    /** @var string|null */
+    private $webhookSecret = null;
 
     /**
      * @param  string   $apiKey          Feedple API key (required, non-empty).
@@ -150,6 +152,7 @@ class FeedpleSDK
      * @param  bool     $isWorkerProcess Internal flag set only by runWorker().
      * @param  string|null $transport    Transport mode: 'webhook' (stateless, default for web/shared hosting)
      *                                    or 'websocket' (persistent daemon).
+     * @param  string|null $webhookSecret Webhook signing secret (optional; auto-fetched/cached).
      *
      * @throws \InvalidArgumentException if $apiKey is empty
      * @throws \RuntimeException         if the database connection cannot be established
@@ -169,7 +172,8 @@ class FeedpleSDK
         ?string                    $runtimeDir          = null,
         /** @internal set only by runWorker(); skips re-spawning a child process. */
         bool                       $isWorkerProcess     = false,
-        ?string                    $transport           = null
+        ?string                    $transport           = null,
+        ?string                    $webhookSecret       = null
     ) {
         $this->apiKey             = $apiKey;
         $this->dbConfig           = $dbConfig;
@@ -182,6 +186,7 @@ class FeedpleSDK
         $this->logger             = $logger;
         $this->isWorkerProcess    = $isWorkerProcess;
         $this->transport          = $transport ?? self::getDefaultTransport();
+        $this->webhookSecret      = $webhookSecret;
 
         if (trim($apiKey) === '') {
             throw new \InvalidArgumentException(
@@ -362,6 +367,12 @@ class FeedpleSDK
             }
         }
 
+        // Live web requests with a real public HTTP host are definitely production
+        $host = self::detectHttpHost();
+        if ($host !== null && !self::isLocalHost($host)) {
+            return false;
+        }
+
         $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
         if (!empty($appUrl) && (str_contains((string) $appUrl, 'localhost') || str_contains((string) $appUrl, '127.0.0.1'))) {
             return true;
@@ -424,6 +435,12 @@ class FeedpleSDK
     /** True when APP_URL points to a loopback / local-only host. */
     public static function isLocalApp(): bool
     {
+        // If a real non-local HTTP host is serving the request, it is NOT local
+        $host = self::detectHttpHost();
+        if ($host !== null && !self::isLocalHost($host)) {
+            return false;
+        }
+
         $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
         return !empty($appUrl) && self::isLocalUrl((string) $appUrl);
     }
@@ -441,12 +458,236 @@ class FeedpleSDK
         if ($host === '') {
             return false;
         }
+        return self::isLocalHost($host);
+    }
+
+    public static function isLocalHost(string $host): bool
+    {
+        if (str_contains($host, ':')) {
+            $host = explode(':', $host)[0];
+        }
+        $host = strtolower(trim($host, '[]'));
+        if ($host === '') {
+            return false;
+        }
         return $host === 'localhost'
             || $host === '0.0.0.0'
             || $host === '::1'
             || str_starts_with($host, '127.')
             || str_ends_with($host, '.localhost')
             || str_ends_with($host, '.test');
+    }
+
+    /**
+     * Automatically detect the incoming or configured HTTP host.
+     */
+    public static function detectHttpHost(): ?string
+    {
+        $host = $_SERVER['HTTP_X_FORWARDED_HOST']
+            ?? $_SERVER['HTTP_HOST']
+            ?? $_SERVER['SERVER_NAME']
+            ?? null;
+
+        if (empty($host)) {
+            return null;
+        }
+
+        if (str_contains((string) $host, ',')) {
+            $parts = explode(',', (string) $host);
+            $host = trim($parts[0]);
+        }
+
+        return trim((string) $host);
+    }
+
+    /**
+     * Automatically detect the HTTP scheme ('https' or 'http').
+     */
+    public static function detectHttpScheme(): string
+    {
+        $proto = strtolower((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+        if ($proto === 'https' || $proto === 'http') {
+            return $proto;
+        }
+
+        if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+            return 'https';
+        }
+
+        if ((int) ($_SERVER['SERVER_PORT'] ?? 0) === 443) {
+            return 'https';
+        }
+
+        return self::isProduction() ? 'https' : 'http';
+    }
+
+    /**
+     * Automatically detect the application base URL (e.g. 'https://example.com').
+     */
+    public static function detectAppUrl(): ?string
+    {
+        // 1. Explicit env var
+        $envUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
+        if (!empty($envUrl) && filter_var($envUrl, FILTER_VALIDATE_URL)) {
+            if (!self::isLocalUrl((string) $envUrl) || self::isDevelopment()) {
+                return rtrim((string) $envUrl, '/');
+            }
+        }
+
+        // 2. Framework config (Laravel / Symfony)
+        if (function_exists('config')) {
+            try {
+                $configUrl = config('app.url');
+                if (!empty($configUrl) && filter_var($configUrl, FILTER_VALIDATE_URL)) {
+                    if (!self::isLocalUrl((string) $configUrl) || self::isDevelopment()) {
+                        return rtrim((string) $configUrl, '/');
+                    }
+                }
+            } catch (\Throwable) {
+                // Ignore if not a framework environment
+            }
+        }
+
+        // 3. Web server / reverse proxy host header
+        $host = self::detectHttpHost();
+        if ($host !== null && $host !== '') {
+            $scheme = self::detectHttpScheme();
+            return "{$scheme}://{$host}";
+        }
+
+        // 4. Common cloud platform environment variables
+        $cloudVars = [
+            'RENDER_EXTERNAL_URL',
+            'RAILWAY_PUBLIC_DOMAIN',
+            'VERCEL_URL',
+        ];
+        foreach ($cloudVars as $var) {
+            $val = getenv($var) ?: ($_ENV[$var] ?? null);
+            if (!empty($val)) {
+                $val = (string) $val;
+                if (!str_starts_with($val, 'http://') && !str_starts_with($val, 'https://')) {
+                    $val = 'https://' . $val;
+                }
+                if (filter_var($val, FILTER_VALIDATE_URL)) {
+                    return rtrim($val, '/');
+                }
+            }
+        }
+
+        return !empty($envUrl) ? rtrim((string) $envUrl, '/') : null;
+    }
+
+    /**
+     * Automatically detect the full webhook bridge URL (e.g. 'https://example.com/api/feedple/bridge').
+     */
+    public static function detectWebhookUrl(?string $bridgePath = null): ?string
+    {
+        $baseUrl = self::detectAppUrl();
+        if (empty($baseUrl)) {
+            return null;
+        }
+
+        $path = $bridgePath ?? self::getDefaultBridgePath();
+        return rtrim($baseUrl, '/') . '/' . ltrim($path, '/');
+    }
+
+    /**
+     * Get the directory where runtime cache and lock files live.
+     */
+    public function getRuntimeDir(): string
+    {
+        return $this->runtimeDir;
+    }
+
+    /**
+     * Get the webhook signing secret, auto-fetching and caching it if not yet configured.
+     */
+    public function getWebhookSecret(): ?string
+    {
+        if ($this->webhookSecret !== null && $this->webhookSecret !== '') {
+            return $this->webhookSecret;
+        }
+
+        $envSecret = getenv('FEEDPLE_WEBHOOK_SECRET') ?: ($_ENV['FEEDPLE_WEBHOOK_SECRET'] ?? null);
+        if (!empty($envSecret)) {
+            $this->webhookSecret = trim((string) $envSecret);
+            return $this->webhookSecret;
+        }
+
+        $cacheFile = $this->webhookSecretCachePath();
+        if (is_file($cacheFile)) {
+            $cached = @file_get_contents($cacheFile);
+            if (!empty($cached)) {
+                $decoded = json_decode($cached, true);
+                if (is_array($decoded) && !empty($decoded['webhook_secret'])) {
+                    $this->webhookSecret = (string) $decoded['webhook_secret'];
+                    return $this->webhookSecret;
+                }
+            }
+        }
+
+        // Auto-fetch from Feedple Cloud using the API key
+        try {
+            return $this->fetchWebhookSecret();
+        } catch (\Throwable $e) {
+            $this->log('debug', 'Feedple: auto-fetch webhook secret failed: ' . $e->getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Cache the webhook signing secret to disk and in-memory.
+     */
+    public function saveWebhookSecret(string $secret): void
+    {
+        $this->webhookSecret = trim($secret);
+        $cacheFile = $this->webhookSecretCachePath();
+        @file_put_contents($cacheFile, json_encode([
+            'webhook_secret' => $this->webhookSecret,
+            'updated_at'     => date('c'),
+        ], JSON_PRETTY_PRINT));
+        @chmod($cacheFile, 0600);
+    }
+
+    /**
+     * Fetch the webhook signing secret from Feedple Cloud using the API key.
+     */
+    public function fetchWebhookSecret(?string $apiBaseUrl = null): ?string
+    {
+        $baseUrl = $apiBaseUrl ?? self::getApiBaseUrl();
+        $endpoint = rtrim($baseUrl, '/') . '/tenants/webhook/secret';
+
+        $ch = curl_init($endpoint);
+        curl_setopt_array($ch, [
+            CURLOPT_HTTPGET        => true,
+            CURLOPT_HTTPHEADER     => [
+                'Authorization: Bearer ' . $this->apiKey,
+                'Accept: application/json',
+                'User-Agent: Feedple-PHP-SDK/1.0',
+            ],
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_SSL_VERIFYPEER => true,
+        ]);
+
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($code >= 200 && $code < 300 && !empty($body)) {
+            $data = json_decode((string) $body, true);
+            if (is_array($data) && !empty($data['webhook_secret'])) {
+                $this->saveWebhookSecret((string) $data['webhook_secret']);
+                return $this->webhookSecret;
+            }
+        }
+
+        return null;
+    }
+
+    private function webhookSecretCachePath(): string
+    {
+        return $this->runtimeDir . DIRECTORY_SEPARATOR . 'feedple-webhook-secret.json';
     }
 
     public static function getDefaultBridgePath(): string
@@ -820,8 +1061,12 @@ class FeedpleSDK
         // transport_mode tells the backend how to deliver runtime queries.
         // In websocket mode we never register a webhook URL.
         $payloadData = ['schema' => $schema, 'transport_mode' => $this->transport];
-        if ($this->transport === 'webhook' && $webhookUrl !== null && $webhookUrl !== '') {
-            $payloadData['webhook_url'] = $webhookUrl;
+        $resolvedWebhookUrl = $webhookUrl;
+        if ($this->transport === 'webhook' && ($resolvedWebhookUrl === null || $resolvedWebhookUrl === '')) {
+            $resolvedWebhookUrl = self::detectWebhookUrl();
+        }
+        if ($this->transport === 'webhook' && !empty($resolvedWebhookUrl)) {
+            $payloadData['webhook_url'] = $resolvedWebhookUrl;
         }
         $payload = json_encode($payloadData, JSON_THROW_ON_ERROR);
 
@@ -870,6 +1115,9 @@ class FeedpleSDK
         }
 
         $this->previousHash = $newHash;
+        if (!empty($decoded['webhook_secret'])) {
+            $this->saveWebhookSecret((string) $decoded['webhook_secret']);
+        }
         $this->log('info', sprintf(
             'Feedple: schema synced via HTTP (status: %s, version: %d)',
             $decoded['status'] ?? 'success',

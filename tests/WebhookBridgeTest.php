@@ -278,4 +278,39 @@ class WebhookBridgeTest extends TestCase
         $this->assertEquals('success', $response['body']['status']);
         $this->assertEquals('req-server-superglobal', $response['body']['request_id']);
     }
+
+    public function testBridgeAutoResolvesSecretFromSdk(): void
+    {
+        // SDK has secret saved
+        $this->sdk->saveWebhookSecret($this->secret);
+
+        // Bridge initialized without secret parameter or env var
+        $bridge = new WebhookBridge($this->sdk);
+
+        $payload = json_encode([
+            'request_id' => 'req-auto-secret',
+            'ir'         => ['operation' => 'query', 'table' => 'users'],
+        ]);
+        $timestamp = time();
+        $sig = hash_hmac('sha256', "{$timestamp}.{$payload}", $this->secret);
+        $headers = [
+            'x-feedple-signature'  => "t={$timestamp},v1={$sig}",
+            'x-feedple-request-id' => 'req-auto-secret',
+        ];
+
+        $response = $bridge->handle($payload, $headers);
+        $this->assertEquals(200, $response['status_code']);
+        $this->assertEquals('success', $response['body']['status']);
+    }
+
+    public function testDetectAppUrlAndWebhookUrl(): void
+    {
+        $_SERVER['HTTP_HOST'] = 'myproductionapp.com';
+        $_SERVER['HTTPS'] = 'on';
+
+        $this->assertEquals('https://myproductionapp.com', FeedpleSDK::detectAppUrl());
+        $this->assertEquals('https://myproductionapp.com/api/feedple/bridge', FeedpleSDK::detectWebhookUrl());
+
+        unset($_SERVER['HTTP_HOST'], $_SERVER['HTTPS']);
+    }
 }

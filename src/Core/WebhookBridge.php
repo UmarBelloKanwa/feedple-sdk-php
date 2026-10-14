@@ -33,7 +33,8 @@ class WebhookBridge
         $this->sdk = $sdk;
         $this->webhookSecret = $webhookSecret
             ?? getenv('FEEDPLE_WEBHOOK_SECRET')
-            ?: ($_ENV['FEEDPLE_WEBHOOK_SECRET'] ?? null);
+            ?: ($_ENV['FEEDPLE_WEBHOOK_SECRET'] ?? null)
+            ?: $sdk->getWebhookSecret();
         $this->tolerance = $tolerance;
     }
 
@@ -174,10 +175,11 @@ class WebhookBridge
         }
 
         // 1. Verify signature
+        $secret = $this->webhookSecret ?: $this->sdk->getWebhookSecret();
         $verification = self::verifySignature(
             $rawBody,
             $signatureHeader,
-            $this->webhookSecret,
+            $secret,
             $this->tolerance
         );
 

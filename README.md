@@ -164,10 +164,13 @@ $sdk->syncSchema();
 In Laravel apps, install the SDK and configure `.env`:
 
 ```ini
+# Required:
 FEEDPLE_API_KEY=fdpl_live_your_actual_api_key
-FEEDPLE_WEBHOOK_SECRET=whsec_your_webhook_signing_secret
-FEEDPLE_TRANSPORT=webhook
-FEEDPLE_BRIDGE_PATH=/api/feedple/bridge
+
+# Optional (auto-detected in production):
+# FEEDPLE_TRANSPORT=webhook       # Auto-detected ('webhook' in prod, 'websocket' in dev)
+# FEEDPLE_WEBHOOK_SECRET=whsec_... # Auto-retrieved & cached from Feedple Cloud via API key
+# FEEDPLE_BRIDGE_PATH=/api/feedple/bridge
 ```
 
 ### Artisan Commands
