@@ -48,11 +48,15 @@ class StatusCommand extends Command
             }
         }
 
-        if ($isRunning && $pid) {
-            $this->info("Worker Status: RUNNING (PID: {$pid})");
+        if ($transport === 'webhook') {
+            $bridgePath = config('feedple.bridge_path') ?? env('FEEDPLE_BRIDGE_PATH', FeedpleSDK::DEFAULT_BRIDGE_PATH);
+            $appUrl = config('app.url') ?? env('APP_URL', '');
+            $bridgeUrl = !empty($appUrl) ? rtrim($appUrl, '/') . '/' . ltrim($bridgePath, '/') : $bridgePath;
+            $this->info("Bridge Status: ACTIVE (Stateless HTTP endpoint: {$bridgeUrl})");
+            $this->line("  → No background daemon required in Webhook mode. Apache/Nginx routes incoming queries to POST {$bridgePath}.");
         } else {
-            if ($transport === 'webhook') {
-                $this->line("Worker Status: STOPPED (not required in webhook mode)");
+            if ($isRunning && $pid) {
+                $this->info("Worker Status: RUNNING (PID: {$pid})");
             } else {
                 $this->warn("Worker Status: STOPPED (Start it with: php artisan feedple:start)");
             }

@@ -121,6 +121,13 @@ class FeedpleServiceProvider extends ServiceProvider
                 }
             }
         }
+
+        // 5. In production webhook mode, auto-register webhook bridge URL with Feedple Cloud
+        if (!$this->app->runningInConsole() && method_exists($this->app, 'terminating')) {
+            $this->app->terminating(function () {
+                $this->autoRegisterWebhookIfProduction();
+            });
+        }
     }
 
     /**
@@ -229,5 +236,53 @@ class FeedpleServiceProvider extends ServiceProvider
         // For regular web requests (FPM, Apache, Nginx, Valet, Herd):
         // Auto-boot in development so WebSocket worker is active without extra commands
         return FeedpleSDK::isDevelopment();
+    }
+
+    /**
+     * In production webhook mode, automatically register the webhook bridge URL
+     * with Feedple Cloud (cached for 24h) so Feedple Cloud knows where to probe
+     * and query without requiring manual sync commands.
+     */
+    protected function autoRegisterWebhookIfProduction(): void
+    {
+        if ($this->app->runningUnitTests() || $this->app->environment('testing')) {
+            return;
+        }
+
+        $transport = config('feedple.transport') ?? FeedpleSDK::getDefaultTransport();
+        if ($transport !== 'webhook') {
+            return;
+        }
+
+        $apiKey = config('feedple.api_key') ?? env('FEEDPLE_API_KEY');
+        if (empty($apiKey) || $apiKey === 'sk_live_your_actual_api_key' || $apiKey === 'sk_live_your_workspace_api_key_here') {
+            return;
+        }
+
+        $appUrl = config('app.url') ?? env('APP_URL');
+        if (empty($appUrl) || FeedpleSDK::isLocalUrl((string) $appUrl) || !filter_var($appUrl, FILTER_VALIDATE_URL)) {
+            return;
+        }
+
+        $cacheFile = sys_get_temp_dir() . '/feedple_webhook_registered_' . substr(md5((string) $apiKey), 0, 10) . '.lock';
+        if (file_exists($cacheFile) && (time() - filemtime($cacheFile) < 86400)) {
+            // Already registered within the last 24 hours
+            return;
+        }
+
+        try {
+            $sdk = static::makeSdk('webhook');
+            if ($sdk) {
+                $bridgePath = config('feedple.bridge_path') ?? env('FEEDPLE_BRIDGE_PATH', FeedpleSDK::DEFAULT_BRIDGE_PATH);
+                $bridgeUrl = rtrim((string) $appUrl, '/') . '/' . ltrim((string) $bridgePath, '/');
+                $sdk->syncSchemaHttp(null, false, $bridgeUrl);
+                @touch($cacheFile);
+            }
+        } catch (\Throwable $e) {
+            // Never disrupt user application lifecycle
+            if (function_exists('logger')) {
+                logger()->debug('Feedple production auto-registration notice: ' . $e->getMessage());
+            }
+        }
     }
 }
