@@ -197,6 +197,9 @@ Main orchestrator class.
 | `$runtimeDir` | `?string` | `null` | Directory for control/pid/log files (defaults to `sys_get_temp_dir()`). |
 | `$isWorkerProcess` | `bool` | `false` | Internal flag set only by worker child process. |
 | `$transport` | `?string` | `null` | Transport strategy: `'webhook'` or `'websocket'`. Defaults dynamically via `FeedpleSDK::getDefaultTransport()` (WebSocket in dev, Webhook in prod, auto-fallback for local apps). |
+| `$webhookSecret` | `?string` | `null` | Webhook signing secret (`whsec_...`). Auto-cached and fetched if omitted. |
+| `$verifySsl` | `bool\|string\|null` | `null` | Verify SSL certificates (defaults to `true`; respects `FEEDPLE_VERIFY_SSL=false`). |
+| `$caBundlePath` | `?string` | `null` | Path to custom CA bundle (defaults to bundled Mozilla bundle; respects `FEEDPLE_CA_BUNDLE`). |
 
 #### Public Methods
 
@@ -234,6 +237,15 @@ Main orchestrator class.
 
 - **`buildCompiler(): SqlCompiler`**:
   Returns a new `SqlCompiler` instance bound to the current `Identity` policy.
+
+- **`isSslVerified(): bool`**:
+  Returns whether SSL certificate verification is enabled for this instance.
+
+- **`getCaBundlePath(): ?string`**:
+  Returns the file path of the resolved or custom CA root bundle certificate used for secure outbound TLS requests.
+
+- **`getWebhookSecret(): ?string`**:
+  Retrieves the active webhook signing secret, automatically fetching and caching it from Feedple Cloud if not pre-configured.
 
 - **`log(string $level, string $message): void`**:
   Logs a message using the injected PSR-3 logger or writes to `feedple-sdk.log`.
@@ -433,6 +445,32 @@ $sdk = new FeedpleSDK(
 );
 ```
 
+### SSL Verification & CA Certificates Configuration
+
+The SDK automatically bundles and resolves a trusted Mozilla CA root certificate bundle (`resources/cacert.pem`), eliminating `cURL error 60: SSL certificate problem: unable to get local issuer certificate` on Windows (XAMPP/WAMP) and shared hosting environments without pre-configured `curl.cainfo`.
+
+You can configure SSL verification in `.env`:
+
+```ini
+# Disable SSL certificate verification (for local self-signed certificates or test servers)
+FEEDPLE_VERIFY_SSL=false
+
+# Or specify a custom CA bundle path (e.g. corporate SSL-inspecting proxy)
+FEEDPLE_CA_BUNDLE="C:\Server\ssl\cacert.pem"
+```
+
+Or configure programmatically in PHP:
+
+```php
+$sdk = new FeedpleSDK(
+    apiKey:       'sk_live_...',
+    dbConfig:     $dbConfig,
+    identity:     $identity,
+    verifySsl:    false, // or true
+    caBundlePath: '/path/to/cacert.pem',
+);
+```
+
 ---
 
 ## 7. Common Workflows
@@ -483,100 +521,72 @@ Crontab entry for server reboot auto-start:
 
 ---
 
-### 2. Laravel Service Provider (`AppServiceProvider`)
+### 2. Laravel Integration (Zero-Config Package Auto-Discovery)
 
-Integrates the SDK worker check directly into Laravel's application boot lifecycle.
+The SDK includes a built-in `FeedpleServiceProvider` that registers automatically via **Laravel Package Discovery**. No manual modifications to `bootstrap/app.php` or `config/app.php` are required.
 
-```php
-<?php
-
-namespace App\Providers;
-
-use Illuminate\Support\ServiceProvider;
-use Feedple\Sdk\FeedpleSDK;
-use Feedple\Sdk\DbConfig;
-use Feedple\Sdk\Core\Identity;
-
-class AppServiceProvider extends ServiceProvider
-{
-    public function boot(): void
-    {
-        if ($this->app->environment('production', 'staging') && !$this->app->runningUnitTests()) {
-            try {
-                new FeedpleSDK(
-                    apiKey:   config('services.feedple.key'),
-                    dbConfig: DbConfig::mysql(
-                        host:     config('database.connections.mysql.host'),
-                        database: config('database.connections.mysql.database'),
-                        username: config('database.connections.mysql.username'),
-                        password: config('database.connections.mysql.password'),
-                        port:     (int) config('database.connections.mysql.port', 3306),
-                    ),
-                    identity:   new Identity(name: config('app.name'), allTables: true),
-                    runtimeDir: storage_path('framework/cache'),
-                );
-            } catch (\Throwable $e) {
-                logger()->error('Feedple SDK failed to bootstrap: ' . $e->getMessage());
-            }
-        }
-    }
-}
+#### Configuration in `.env`
+```ini
+FEEDPLE_API_KEY=fdpl_live_your_actual_api_key
+FEEDPLE_TRANSPORT=webhook  # 'webhook' for stateless production, 'websocket' for local dev
+FEEDPLE_BRIDGE_PATH=/api/feedple/bridge
+FEEDPLE_VERIFY_SSL=true    # set false for self-signed certs or local Windows Apache
 ```
+
+#### Automatic Route Registration & CSRF Bypass
+`FeedpleServiceProvider` registers the route `POST /api/feedple/bridge` automatically and exempts it from Laravel's CSRF token verification middleware.
+
+#### Built-in Artisan Commands
+```bash
+# Push schema to Feedple Cloud and auto-register webhook URL
+php artisan feedple:sync
+
+# Force schema re-synchronization
+php artisan feedple:sync --force
+
+# Override bridge URL for tunnels (e.g. ngrok)
+php artisan feedple:sync --bridge-url=https://xyz.ngrok-free.app/api/feedple/bridge
+
+# Check SDK configuration, transport status, and recent logs
+php artisan feedple:status
+
+# Start background WebSocket daemon (with optional live log tail)
+php artisan feedple:start
+php artisan feedple:start --tail
+
+# Stop background WebSocket daemon
+php artisan feedple:stop
+
+# (Optional) Publish configuration file to config/feedple.php
+php artisan vendor:publish --tag=feedple-config
+```
+
+#### Production Zero-Maintenance Auto-Registration
+When `FEEDPLE_TRANSPORT=webhook` in production, the SDK hooks into Laravel's `app->terminating()` lifecycle to automatically synchronize and register your webhook bridge URL with Feedple Cloud with a 24-hour cache lock.
 
 ---
 
-### 3. Custom Laravel Artisan Command (`php artisan feedple:start`)
+### 3. Standalone CLI for Any PHP Project (`./vendor/bin/feedple`)
 
-Encapsulates worker management inside a clean Artisan CLI command.
+For non-Laravel frameworks (Symfony, WordPress, CodeIgniter, Yii) or vanilla PHP projects, the SDK includes a unified CLI binary installed to `./vendor/bin/feedple`.
 
-Create `app/Console/Commands/FeedpleStart.php`:
-
-```php
-<?php
-
-namespace App\Console\Commands;
-
-use Illuminate\Console\Command;
-use Feedple\Sdk\FeedpleSDK;
-use Feedple\Sdk\DbConfig;
-use Feedple\Sdk\Core\Identity;
-
-class FeedpleStart extends Command
-{
-    protected $signature   = 'feedple:start';
-    protected $description = 'Verifies connection health and spawns the detached Feedple background sync worker';
-
-    public function handle(): int
-    {
-        $this->info('Initializing Feedple SDK...');
-
-        try {
-            new FeedpleSDK(
-                apiKey:   config('services.feedple.key'),
-                dbConfig: DbConfig::mysql(
-                    host:     config('database.connections.mysql.host'),
-                    database: config('database.connections.mysql.database'),
-                    username: config('database.connections.mysql.username'),
-                    password: config('database.connections.mysql.password'),
-                ),
-                identity:   new Identity(name: config('app.name'), allTables: true),
-                runtimeDir: storage_path('app/feedple'),
-            );
-
-            $this->info('Feedple worker active.');
-            return Command::SUCCESS;
-        } catch (\Throwable $e) {
-            $this->error('Failed to launch Feedple SDK worker: ' . $e->getMessage());
-            return Command::FAILURE;
-        }
-    }
-}
-```
-
-Execute:
+The standalone CLI automatically parses `.env` in the current working directory:
 
 ```bash
-php artisan feedple:start
+# Display configuration and connection health
+./vendor/bin/feedple status
+./vendor/bin/feedple status --lines=25
+
+# Synchronize database schema and register webhook bridge
+./vendor/bin/feedple sync
+./vendor/bin/feedple sync --force --bridge-url=https://myapp.com/feedple-bridge.php
+
+# Start persistent WebSocket daemon (with optional live log tail)
+./vendor/bin/feedple start
+./vendor/bin/feedple start --tail
+
+# Stop background WebSocket daemon
+./vendor/bin/feedple stop
 ```
 
 ---
@@ -651,7 +661,10 @@ class FeedpleSDK
         ?LoggerInterface  $logger              = null,
         ?string           $runtimeDir          = null,
         bool              $isWorkerProcess     = false,
-        ?string           $transport           = null // 'webhook' or 'websocket'
+        ?string           $transport           = null, // 'webhook' or 'websocket'
+        ?string           $webhookSecret       = null,
+        bool|string|null  $verifySsl           = null, // bool or FEEDPLE_VERIFY_SSL
+        ?string           $caBundlePath        = null  // path or FEEDPLE_CA_BUNDLE
     );
 
     public function run(): void; // starts worker event loop (blocking)
@@ -661,6 +674,9 @@ class FeedpleSDK
     public function executeIr(array $ir): array; // validates RBAC and executes IR AST
     public function getTransport(): string;
     public function setTransport(string $transport): void;
+    public function isSslVerified(): bool;
+    public function getCaBundlePath(): ?string;
+    public function getWebhookSecret(): ?string;
     public function buildCompiler(): SqlCompiler;
     public function log(string $level, string $message): void;
     public static function runWorker(string $controlFilePath): void;

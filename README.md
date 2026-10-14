@@ -199,6 +199,31 @@ php artisan feedple:stop
 
 ---
 
+## Standalone CLI Binary (`./vendor/bin/feedple`)
+
+For non-Laravel frameworks (Symfony, WordPress, CodeIgniter, Yii) or vanilla PHP projects, the SDK includes a unified CLI binary installed to `./vendor/bin/feedple`.
+
+The CLI automatically detects your project's `.env` file and connects using standard `DB_*` and `FEEDPLE_*` environment variables:
+
+```bash
+# Check status and database connection
+./vendor/bin/feedple status
+./vendor/bin/feedple status --lines=25
+
+# Synchronize schema and register webhook bridge
+./vendor/bin/feedple sync
+./vendor/bin/feedple sync --force --bridge-url=https://myapp.com/feedple-bridge.php
+
+# Start persistent WebSocket daemon (with optional live log tailing)
+./vendor/bin/feedple start
+./vendor/bin/feedple start --tail
+
+# Stop background WebSocket daemon
+./vendor/bin/feedple stop
+```
+
+---
+
 ## Environment Configuration
 
 By default, the SDK connects to **Feedple Cloud**:
@@ -211,6 +236,20 @@ To connect to a **local Feedple server** during development, set in `.env`:
 FEEDPLE_DEV_ENV=true
 ```
 *(Sets API to `http://localhost:8000/api/v1` and WebSocket to `ws://localhost:8000/api/v1/tenants/ws`)*
+
+### SSL Verification & CA Certificate Bundles
+
+The SDK automatically resolves a bundled Mozilla CA root certificate bundle (`resources/cacert.pem`), eliminating `cURL error 60: SSL certificate problem: unable to get local issuer certificate` on Windows (XAMPP/WAMP) and shared hosting.
+
+You can customize SSL behavior in `.env`:
+
+```ini
+# Disable SSL certificate verification (e.g. for self-signed certificates or local dev)
+FEEDPLE_VERIFY_SSL=false
+
+# Or specify a custom CA bundle path
+FEEDPLE_CA_BUNDLE="C:\Server\ssl\cacert.pem"
+```
 
 ---
 
@@ -235,7 +274,10 @@ class FeedpleSDK
         ?LoggerInterface  $logger             = null,
         ?string           $runtimeDir         = null,
         bool              $isWorkerProcess    = false,
-        ?string           $transport          = null // 'webhook' | 'websocket'
+        ?string           $transport          = null, // 'webhook' | 'websocket'
+        ?string           $webhookSecret      = null,
+        bool|string|null  $verifySsl          = null, // bool or FEEDPLE_VERIFY_SSL
+        ?string           $caBundlePath       = null  // path or FEEDPLE_CA_BUNDLE
     );
 
     public function run(): void;
@@ -245,6 +287,8 @@ class FeedpleSDK
     public function executeIr(array $ir): array;
     public function getTransport(): string;
     public function setTransport(string $transport): void;
+    public function isSslVerified(): bool;
+    public function getCaBundlePath(): ?string;
 
     // Helpers
     public static function getDefaultTransport(): string;
@@ -253,6 +297,7 @@ class FeedpleSDK
     public static function isWebhookReachable(): bool;
     public static function isLocalApp(): bool;
     public static function isDevEnv(): bool;
+    public static function resolveCaBundle(): ?string;
 }
 ```
 
