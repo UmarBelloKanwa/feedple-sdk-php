@@ -180,7 +180,7 @@ class FeedpleSDK
         bool                       $isWorkerProcess     = false,
         ?string                    $transport           = null,
         ?string                    $webhookSecret       = null,
-        ?bool                      $verifySsl           = null,
+        bool|string|null           $verifySsl           = null,
         ?string                    $caBundlePath        = null
     ) {
         $this->apiKey             = $apiKey;
@@ -195,7 +195,14 @@ class FeedpleSDK
         $this->isWorkerProcess    = $isWorkerProcess;
         $this->transport          = $transport ?? self::getDefaultTransport();
         $this->webhookSecret      = $webhookSecret;
-        $this->verifySsl          = $verifySsl ?? self::isSslVerificationEnabled();
+
+        if ($verifySsl !== null) {
+            $filtered = filter_var($verifySsl, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            $this->verifySsl = $filtered !== null ? $filtered : self::isSslVerificationEnabled();
+        } else {
+            $this->verifySsl = self::isSslVerificationEnabled();
+        }
+
         $this->caBundlePath       = $caBundlePath ?? self::resolveCaBundle();
 
         if (trim($apiKey) === '') {
@@ -676,8 +683,11 @@ class FeedpleSDK
         if ($val === false || $val === null || $val === '') {
             $val = $_ENV['FEEDPLE_VERIFY_SSL'] ?? null;
         }
-        if ($val !== null && ($val === 'false' || $val === '0' || $val === false)) {
-            return false;
+        if ($val !== null) {
+            $filtered = filter_var($val, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            if ($filtered !== null) {
+                return $filtered;
+            }
         }
         return true;
     }

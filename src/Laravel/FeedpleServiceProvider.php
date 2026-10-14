@@ -141,7 +141,7 @@ class FeedpleServiceProvider extends ServiceProvider
             return static::$cachedSdk;
         }
 
-        $apiKey = config('feedple.api_key')
+        $apiKey = static::safeConfig('feedple.api_key')
             ?? env('FEEDPLE_API_KEY')
             ?: ($_ENV['FEEDPLE_API_KEY'] ?? getenv('FEEDPLE_API_KEY') ?: null);
 
@@ -149,8 +149,8 @@ class FeedpleServiceProvider extends ServiceProvider
             return null;
         }
 
-        $defaultConn = config('database.default', env('DB_CONNECTION', 'sqlite'));
-        $connConfig = config("database.connections.{$defaultConn}", []);
+        $defaultConn = static::safeConfig('database.default', env('DB_CONNECTION', 'sqlite'));
+        $connConfig = static::safeConfig("database.connections.{$defaultConn}", []);
         $dbDriver = $connConfig['driver'] ?? $defaultConn;
 
         if ($dbDriver === 'mysql' || $dbDriver === 'mariadb') {
@@ -188,7 +188,7 @@ class FeedpleServiceProvider extends ServiceProvider
             $dbConfig = DbConfig::sqlite(path: (string) $dbPath);
         }
 
-        $allowedTables = config('feedple.allowed_tables');
+        $allowedTables = static::safeConfig('feedple.allowed_tables');
         if (is_array($allowedTables) && !empty($allowedTables)) {
             $identity = new Identity(
                 name: 'laravel-app',
@@ -202,14 +202,17 @@ class FeedpleServiceProvider extends ServiceProvider
         }
 
         $selectedTransport = $transport
-            ?? config('feedple.transport')
+            ?? static::safeConfig('feedple.transport')
             ?? FeedpleSDK::getDefaultTransport();
 
-        $verifySsl = config('feedple.verify_ssl');
-        if ($verifySsl === null) {
+        $verifySslConfig = static::safeConfig('feedple.verify_ssl');
+        if ($verifySslConfig !== null) {
+            $filtered = filter_var($verifySslConfig, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+            $verifySsl = $filtered !== null ? $filtered : FeedpleSDK::isSslVerificationEnabled();
+        } else {
             $verifySsl = FeedpleSDK::isSslVerificationEnabled();
         }
-        $caBundle = config('feedple.ca_bundle') ?? FeedpleSDK::resolveCaBundle();
+        $caBundle = static::safeConfig('feedple.ca_bundle') ?? FeedpleSDK::resolveCaBundle();
 
         return static::$cachedSdk = new FeedpleSDK(
             apiKey: $apiKey,
@@ -219,6 +222,24 @@ class FeedpleServiceProvider extends ServiceProvider
             verifySsl: (bool) $verifySsl,
             caBundlePath: $caBundle
         );
+    }
+
+    /**
+     * Safely read a Laravel config value with fallback if configuration is not yet loaded.
+     */
+    protected static function safeConfig(string $key, mixed $default = null): mixed
+    {
+        if (function_exists('app') && function_exists('config')) {
+            try {
+                $app = app();
+                if ($app && method_exists($app, 'bound') && $app->bound('config')) {
+                    return config($key, $default);
+                }
+            } catch (\Throwable) {
+                // Fall through to default
+            }
+        }
+        return $default;
     }
 
     /**

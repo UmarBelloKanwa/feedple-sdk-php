@@ -81,11 +81,52 @@ class SslAndCaBundleTest extends TestCase
             dbConfig: DbConfig::sqlite($this->tempDb),
             identity: new Identity(name: 'test', allTables: true),
             transport: 'webhook',
+            webhookSecret: 'whsec_custom_secret',
             verifySsl: false,
             caBundlePath: '/custom/ca.pem'
         );
 
         $this->assertFalse($sdk->isSslVerified());
         $this->assertSame('/custom/ca.pem', $sdk->getCaBundlePath());
+        $this->assertSame('whsec_custom_secret', $sdk->getWebhookSecret());
+    }
+
+    public function testStringBooleansInConstructor(): void
+    {
+        $sdkFalseString = new FeedpleSDK(
+            apiKey: 'test-api-key',
+            dbConfig: DbConfig::sqlite($this->tempDb),
+            identity: new Identity(name: 'test', allTables: true),
+            transport: 'webhook',
+            verifySsl: 'false'
+        );
+        $this->assertFalse($sdkFalseString->isSslVerified(), 'String "false" must evaluate to false');
+
+        $sdkZeroString = new FeedpleSDK(
+            apiKey: 'test-api-key',
+            dbConfig: DbConfig::sqlite($this->tempDb),
+            identity: new Identity(name: 'test', allTables: true),
+            transport: 'webhook',
+            verifySsl: '0'
+        );
+        $this->assertFalse($sdkZeroString->isSslVerified(), 'String "0" must evaluate to false');
+
+        $sdkOffString = new FeedpleSDK(
+            apiKey: 'test-api-key',
+            dbConfig: DbConfig::sqlite($this->tempDb),
+            identity: new Identity(name: 'test', allTables: true),
+            transport: 'webhook',
+            verifySsl: 'off'
+        );
+        $this->assertFalse($sdkOffString->isSslVerified(), 'String "off" must evaluate to false');
+
+        $sdkTrueString = new FeedpleSDK(
+            apiKey: 'test-api-key',
+            dbConfig: DbConfig::sqlite($this->tempDb),
+            identity: new Identity(name: 'test', allTables: true),
+            transport: 'webhook',
+            verifySsl: 'true'
+        );
+        $this->assertTrue($sdkTrueString->isSslVerified(), 'String "true" must evaluate to true');
     }
 }
