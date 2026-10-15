@@ -466,8 +466,16 @@ class FeedpleWebSocket
                 $this->logger->error("Feedple: auth failed: {$reason}");
                 $this->authDeferred?->reject(new AuthException("Auth failed: {$reason}"));
                 $reasonLower = strtolower($reason);
-                if (str_contains($reasonLower, 'forbidden') || str_contains($reasonLower, 'account disabled') || str_contains($reasonLower, 'suspended')) {
+                if (
+                    str_contains($reasonLower, 'invalid')
+                    || str_contains($reasonLower, 'forbidden')
+                    || str_contains($reasonLower, 'unauthorized')
+                    || str_contains($reasonLower, 'account disabled')
+                    || str_contains($reasonLower, 'suspended')
+                    || !str_contains($reasonLower, 'temporary')
+                ) {
                     $this->stopRequested = true;
+                    $this->reconnectEnabled = false;
                 }
                 // Clear session ID on auth rejection so next reconnect negotiates a fresh session
                 $this->sessionId = null;

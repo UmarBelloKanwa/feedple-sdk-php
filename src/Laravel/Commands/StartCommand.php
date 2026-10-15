@@ -3,15 +3,28 @@
 namespace Feedple\Sdk\Laravel\Commands;
 
 use Illuminate\Console\Command;
+use Feedple\Sdk\FeedpleSDK;
 use Feedple\Sdk\Laravel\FeedpleServiceProvider;
 
 class StartCommand extends Command
 {
-    protected $signature = 'feedple:start {--tail : Stream worker logs in real time}';
+    protected $signature = 'feedple:start {--tail : Stream worker logs in real time} {--force : Force start WebSocket worker even if transport is webhook}';
     protected $description = 'Start the Feedple background worker daemon (WebSocket dev mode)';
 
     public function handle(): int
     {
+        $transport = config('feedple.transport') ?? FeedpleSDK::getDefaultTransport();
+
+        if ($transport === 'webhook' && !$this->option('force')) {
+            $bridgePath = config('feedple.bridge_path') ?? env('FEEDPLE_BRIDGE_PATH', FeedpleSDK::DEFAULT_BRIDGE_PATH);
+            $this->warn('Notice: Your application is configured for Webhook mode (FEEDPLE_TRANSPORT=webhook).');
+            $this->line('  → Webhook mode is stateless and does not use a background worker daemon.');
+            $this->line("  → Your HTTP bridge is active at: <info>{$bridgePath}</info>");
+            $this->line('  → To sync your database schema, run: <comment>php artisan feedple:sync</comment>');
+            $this->line('  → To force start a WebSocket daemon anyway, run: <comment>php artisan feedple:start --force</comment>');
+            return Command::SUCCESS;
+        }
+
         $this->info('Initializing Feedple SDK in WebSocket mode...');
 
         try {

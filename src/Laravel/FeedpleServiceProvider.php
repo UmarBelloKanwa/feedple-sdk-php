@@ -290,7 +290,15 @@ class FeedpleServiceProvider extends ServiceProvider
 
         $appUrl = config('app.url') ?? env('APP_URL');
         if (empty($appUrl) || FeedpleSDK::isLocalUrl((string) $appUrl) || !filter_var($appUrl, FILTER_VALIDATE_URL)) {
+            $appUrl = FeedpleSDK::detectAppUrl();
+        }
+        if (empty($appUrl) || FeedpleSDK::isLocalUrl((string) $appUrl) || !filter_var($appUrl, FILTER_VALIDATE_URL)) {
             return;
+        }
+
+        // Ensure HTTPS on production public URLs (Feedple Cloud requires HTTPS for webhooks)
+        if (FeedpleSDK::isProduction() && str_starts_with((string) $appUrl, 'http://') && !FeedpleSDK::isLocalUrl((string) $appUrl)) {
+            $appUrl = 'https://' . substr((string) $appUrl, 7);
         }
 
         $cacheFile = sys_get_temp_dir() . '/feedple_webhook_registered_' . substr(md5((string) $apiKey), 0, 10) . '.lock';
