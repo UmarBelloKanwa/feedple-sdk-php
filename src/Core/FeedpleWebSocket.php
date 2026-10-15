@@ -604,11 +604,16 @@ class FeedpleWebSocket
             $this->logger->warning("Feedple: sendSchema called before authentication, will retry when ready");
             
             if ($this->authDeferred !== null) {
-                $this->authDeferred->promise()->then(function () use ($schema, $chunkSize) {
-                    if (!$this->stopRequested) {
-                        $this->sendSchema($schema, $chunkSize);
+                $this->authDeferred->promise()->then(
+                    function () use ($schema, $chunkSize) {
+                        if (!$this->stopRequested) {
+                            $this->sendSchema($schema, $chunkSize);
+                        }
+                    },
+                    function (\Throwable $e) {
+                        // Handled: schema sending skipped due to authentication rejection
                     }
-                });
+                );
             } else {
                 // Defer until authenticated — schedule a check on the next tick
                 $this->loop->futureTick(function () use ($schema, $chunkSize) {
@@ -657,11 +662,16 @@ class FeedpleWebSocket
         } catch (\Throwable $e) {
             $this->logger->warning("Feedple: schema transmission interrupted ({$e->getMessage()}), will retry upon reconnect");
             if ($this->authDeferred !== null) {
-                $this->authDeferred->promise()->then(function () use ($schema, $chunkSize) {
-                    if (!$this->stopRequested) {
-                        $this->sendSchema($schema, $chunkSize);
+                $this->authDeferred->promise()->then(
+                    function () use ($schema, $chunkSize) {
+                        if (!$this->stopRequested) {
+                            $this->sendSchema($schema, $chunkSize);
+                        }
+                    },
+                    function (\Throwable $e) {
+                        // Handled: schema sending skipped due to authentication rejection
                     }
-                });
+                );
             }
         }
     }

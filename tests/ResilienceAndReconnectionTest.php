@@ -205,6 +205,9 @@ class ResilienceAndReconnectionTest extends TestCase
             $this->assertFileExists($logPath, 'New log file must exist');
             $this->assertLessThan(1024, filesize($logPath), 'New log file should only contain the new line');
         } finally {
+            if (isset($sdk)) {
+                $sdk->stop();
+            }
             @unlink($tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.log');
             @unlink($tempDir . DIRECTORY_SEPARATOR . 'feedple-sdk.log.1');
             @rmdir($tempDir);

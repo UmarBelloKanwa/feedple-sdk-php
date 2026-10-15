@@ -223,6 +223,20 @@ class FeedpleSdkTest extends TestCase
             $set(['APP_ENV' => 'production', 'APP_URL' => 'https://myapp.com']);
             $this->assertStringStartsWith('https://', FeedpleSDK::getApiBaseUrl());
             $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
+
+            // 4. Live web request with public host automatically overrides stale .env APP_ENV=local and APP_URL=http://localhost
+            $set(['APP_ENV' => 'local', 'APP_URL' => 'http://localhost']);
+            $_SERVER['HTTP_HOST'] = 'clientstore.com';
+            $_SERVER['HTTPS'] = 'on';
+            try {
+                $this->assertFalse(FeedpleSDK::isDevelopment());
+                $this->assertTrue(FeedpleSDK::isProduction());
+                $this->assertFalse(FeedpleSDK::isLocalApp());
+                $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
+                $this->assertSame('https://clientstore.com', FeedpleSDK::detectAppUrl());
+            } finally {
+                unset($_SERVER['HTTP_HOST'], $_SERVER['HTTPS']);
+            }
         } finally {
             $set([]);
         }

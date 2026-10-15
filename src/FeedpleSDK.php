@@ -360,8 +360,198 @@ class FeedpleSDK
      * 3. APP_URL pointing to localhost or 127.0.0.1
      * 4. FEEDPLE_DEV_ENV (fallback for plain-PHP scripts with no APP_* vars)
      */
+    /**
+     * Check if running under a local CLI development server (e.g. `php artisan serve` or PHP built-in server).
+     */
+    public static function isCliDevServer(): bool
+    {
+        if (php_sapi_name() === 'cli-server') {
+            return true;
+        }
+        $argv = $_SERVER['argv'] ?? [];
+        return is_array($argv) && in_array('serve', $argv, true);
+    }
+
+    /**
+     * Check if running in a known local development desktop tool (Herd, Valet, Laragon, XAMPP, etc.).
+     */
+    public static function isLocalDevTool(): bool
+    {
+        if (!empty($_SERVER['HERD_HOME']) || !empty(getenv('HERD_HOME')) || !empty($_SERVER['VALET_HOME_PATH'])) {
+            return true;
+        }
+        if (!empty($_SERVER['LARAGON_HOME']) || !empty(getenv('LARAGON_HOME'))) {
+            return true;
+        }
+        $cwd = getcwd() ?: '';
+        return str_contains($cwd, '/xampp/') || str_contains($cwd, '\\xampp\\')
+            || str_contains($cwd, '/wamp/')  || str_contains($cwd, '\\wamp\\');
+    }
+
+    /**
+     * Check if running inside a production server environment
+     * (cPanel shared hosting, Apache, Nginx, PHP-FPM, LiteSpeed, or Linux /var/www, /home/[user]/public_html).
+     */
+    public static function isServerEnvironment(): bool
+    {
+        // 1. SAPI check for real web servers
+        $sapi = php_sapi_name();
+        if (in_array($sapi, ['fpm-fcgi', 'apache2handler', 'litespeed', 'cgi-fcgi'], true)) {
+            return true;
+        }
+
+        // 2. Cloud platform container flags
+        if (!empty($_SERVER['K_SERVICE']) || !empty(getenv('K_SERVICE'))
+            || !empty($_SERVER['AWS_EXECUTION_ENV']) || !empty(getenv('AWS_EXECUTION_ENV'))
+            || !empty($_SERVER['DYNO']) || !empty(getenv('DYNO'))
+            || !empty($_SERVER['RENDER']) || !empty(getenv('RENDER'))
+            || !empty($_SERVER['RAILWAY_ENVIRONMENT']) || !empty(getenv('RAILWAY_ENVIRONMENT'))
+        ) {
+            return true;
+        }
+
+        // 3. Shared hosting & server directory structure check
+        $pathsToCheck = array_filter([
+            getcwd() ?: null,
+            function_exists('base_path') ? base_path() : null,
+            $_SERVER['DOCUMENT_ROOT'] ?? null,
+        ]);
+        foreach ($pathsToCheck as $path) {
+            if (preg_match('#/(home|home\d+|var|srv)/[^/]+/(public_html|domains|www)#', $path)
+                || str_starts_with($path, '/var/www')
+                || str_starts_with($path, '/srv/www')
+                || str_starts_with($path, '/var/app/current')
+            ) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Check if currently running within a PHPUnit or automated testing runner.
+     */
+    public static function isTesting(): bool
+    {
+        return defined('PHPUNIT_COMPOSER_INSTALL')
+            || defined('__PHPUNIT_PHAR__')
+            || (getenv('APP_ENV') === 'testing' || ($_ENV['APP_ENV'] ?? null) === 'testing')
+            || (function_exists('app') && method_exists(app(), 'runningUnitTests') && app()->runningUnitTests());
+    }
+
+    /**
+     * Cache the last known public application URL to a runtime file.
+     */
+    public static function cacheKnownAppUrl(string $url): void
+    {
+        if (self::isTesting() || empty($url) || self::isLocalUrl($url)) {
+            return;
+        }
+        $key = substr(md5(getcwd() ?: 'feedple'), 0, 10);
+        $cacheFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "feedple-app-url-{$key}.cache";
+        @file_put_contents($cacheFile, trim($url));
+    }
+
+    /**
+     * Retrieve the last known public application URL from cache.
+     */
+    public static function getCachedAppUrl(): ?string
+    {
+        if (self::isTesting()) {
+            return null;
+        }
+        $key = substr(md5(getcwd() ?: 'feedple'), 0, 10);
+        $cacheFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . "feedple-app-url-{$key}.cache";
+        if (@file_exists($cacheFile) && @is_readable($cacheFile)) {
+            $cached = trim((string) @file_get_contents($cacheFile));
+            if (!empty($cached) && filter_var($cached, FILTER_VALIDATE_URL) && !self::isLocalUrl($cached)) {
+                return $cached;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Attempt to detect the application's public URL from server configuration,
+     * virtual host settings, or filesystem domain paths.
+     */
+    public static function detectServerAppUrl(): ?string
+    {
+        // 1. Check $_SERVER['SERVER_NAME'] or $_SERVER['HTTP_HOST']
+        $serverName = $_SERVER['SERVER_NAME'] ?? ($_SERVER['HTTP_HOST'] ?? null);
+        if (!empty($serverName)) {
+            $cleanName = trim((string) $serverName);
+            if (str_contains($cleanName, ':')) {
+                $cleanName = explode(':', $cleanName)[0];
+            }
+            if (!self::isLocalHost($cleanName) && str_contains($cleanName, '.') && preg_match('/^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/', $cleanName)) {
+                $scheme = self::detectHttpScheme();
+                return "{$scheme}://{$cleanName}";
+            }
+        }
+
+        // 2. Check hostname if it is a FQDN
+        $hostname = @gethostname();
+        if (!empty($hostname) && !self::isLocalHost($hostname) && str_contains($hostname, '.')) {
+            if (preg_match('/^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/', $hostname)) {
+                return "https://{$hostname}";
+            }
+        }
+
+        // 3. Check directory path on cPanel or Apache/Nginx (e.g. /home/user/mysite.com/public_html)
+        $pathsToCheck = array_filter([
+            getcwd() ?: null,
+            function_exists('base_path') ? base_path() : null,
+            $_SERVER['DOCUMENT_ROOT'] ?? null,
+        ]);
+        foreach ($pathsToCheck as $path) {
+            $segments = explode(DIRECTORY_SEPARATOR, trim($path, DIRECTORY_SEPARATOR));
+            foreach ($segments as $segment) {
+                if (preg_match('/^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/', $segment) && !self::isLocalHost($segment)) {
+                    return "https://{$segment}";
+                }
+            }
+        }
+
+        return null;
+    }
+
     public static function isDevelopment(): bool
     {
+        // 1. Live web requests with a real public HTTP host are ALWAYS production!
+        // A request arriving at https://mysite.com is NEVER local development,
+        // regardless of any unconfigured or stale APP_ENV in .env.
+        $host = self::detectHttpHost();
+        if ($host !== null && !self::isLocalHost($host)) {
+            return false;
+        }
+
+        // 2. Active CLI dev server (`php artisan serve` or `php -S`) is always local development
+        if (self::isCliDevServer()) {
+            return true;
+        }
+
+        // 3. Explicit dev env override (for local developers testing against local backend)
+        $override = getenv('FEEDPLE_DEV_ENV') ?: ($_ENV['FEEDPLE_DEV_ENV'] ?? ($_SERVER['FEEDPLE_DEV_ENV'] ?? null));
+        if ($override !== null && $override !== '') {
+            return filter_var($override, FILTER_VALIDATE_BOOLEAN);
+        }
+        if (defined('FEEDPLE_DEV_ENV') && constant('FEEDPLE_DEV_ENV') === true) {
+            return true;
+        }
+
+        // 4. Known local development desktop tools (Herd, Valet, Laragon, XAMPP)
+        if (self::isLocalDevTool()) {
+            return true;
+        }
+
+        // 5. If we have a cached public host from live traffic, we are on a production server
+        if (self::getCachedAppUrl() !== null) {
+            return false;
+        }
+
+        // 6. Explicit Framework or Environment setting
         if (function_exists('app')) {
             try {
                 $app = app();
@@ -395,44 +585,45 @@ class FeedpleSDK
             }
         }
 
-        $appEnv = getenv('APP_ENV') ?: ($_ENV['APP_ENV'] ?? null);
+        $appEnv = getenv('APP_ENV') ?: ($_ENV['APP_ENV'] ?? ($_SERVER['APP_ENV'] ?? null));
         if (!empty($appEnv)) {
             $lower = strtolower(trim((string) $appEnv));
-            if (in_array($lower, ['local', 'development', 'dev', 'testing', 'test'], true)) {
-                return true;
-            }
             if (in_array($lower, ['production', 'prod', 'staging', 'live'], true)) {
                 return false;
+            }
+            if (in_array($lower, ['local', 'development', 'dev', 'testing', 'test'], true)) {
+                return true;
             }
         }
 
         $genericEnv = getenv('ENVIRONMENT') ?: ($_ENV['ENVIRONMENT'] ?? getenv('ENV') ?: ($_ENV['ENV'] ?? null));
         if (!empty($genericEnv)) {
             $lower = strtolower(trim((string) $genericEnv));
-            if (in_array($lower, ['local', 'development', 'dev', 'testing', 'test'], true)) {
-                return true;
-            }
             if (in_array($lower, ['production', 'prod', 'staging', 'live'], true)) {
                 return false;
             }
+            if (in_array($lower, ['local', 'development', 'dev', 'testing', 'test'], true)) {
+                return true;
+            }
         }
 
-        // Live web requests with a real public HTTP host are definitely production
-        $host = self::detectHttpHost();
-        if ($host !== null && !self::isLocalHost($host)) {
+        // 7. Check if running on a live server environment (cPanel, Apache, FPM, LiteSpeed, /var/www, /home/*/public_html)
+        if (self::isServerEnvironment()) {
             return false;
         }
 
-        $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
-        if (!empty($appUrl) && (str_contains((string) $appUrl, 'localhost') || str_contains((string) $appUrl, '127.0.0.1'))) {
+        // 8. If APP_URL is explicitly set to a public URL, it is production
+        $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? ($_SERVER['APP_URL'] ?? null));
+        if (!empty($appUrl) && !self::isLocalUrl((string) $appUrl)) {
+            return false;
+        }
+
+        // 9. If APP_URL is explicitly set to localhost/127.0.0.1, it is local development
+        if (!empty($appUrl) && self::isLocalUrl((string) $appUrl)) {
             return true;
         }
 
-        $override = getenv('FEEDPLE_DEV_ENV') ?: ($_ENV['FEEDPLE_DEV_ENV'] ?? null);
-        if ($override !== null && $override !== '') {
-            return filter_var($override, FILTER_VALIDATE_BOOLEAN);
-        }
-
+        // 10. Default to production when no local development signals are present
         return false;
     }
 
@@ -461,7 +652,7 @@ class FeedpleSDK
      */
     public static function getDefaultTransport(): string
     {
-        $override  = getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? null);
+        $override  = getenv('FEEDPLE_TRANSPORT') ?: ($_ENV['FEEDPLE_TRANSPORT'] ?? ($_SERVER['FEEDPLE_TRANSPORT'] ?? null));
         $requested = !empty($override)
             ? strtolower(trim((string) $override))
             : (self::isDevelopment() ? 'websocket' : 'webhook');
@@ -485,14 +676,36 @@ class FeedpleSDK
     /** True when APP_URL points to a loopback / local-only host. */
     public static function isLocalApp(): bool
     {
-        // If a real non-local HTTP host is serving the request, it is NOT local
+        // 1. If a real non-local HTTP host is serving the request, it is NOT local
         $host = self::detectHttpHost();
         if ($host !== null && !self::isLocalHost($host)) {
             return false;
         }
 
-        $appUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
-        return !empty($appUrl) && self::isLocalUrl((string) $appUrl);
+        // 2. If a cached public URL exists from live traffic, it is NOT local
+        if (self::getCachedAppUrl() !== null) {
+            return false;
+        }
+
+        // 3. Active CLI dev server (`php artisan serve`) is definitely local
+        if (self::isCliDevServer()) {
+            return true;
+        }
+
+        // 4. Detected app URL
+        $appUrl = self::detectAppUrl();
+        if (!empty($appUrl) && !self::isLocalUrl($appUrl)) {
+            return false;
+        }
+
+        // 5. If running in a server environment (cPanel / Apache / FPM) and NOT artisan serve,
+        // it is not a local app even if APP_URL was left as localhost in boilerplate .env
+        if (self::isServerEnvironment() && !self::isCliDevServer()) {
+            return false;
+        }
+
+        $rawAppUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? ($_SERVER['APP_URL'] ?? null));
+        return !empty($rawAppUrl) && self::isLocalUrl((string) $rawAppUrl);
     }
 
     /** True when the resolved Feedple API base URL is a local server. */
@@ -583,20 +796,41 @@ class FeedpleSDK
         if (!empty($explicitUrl) && filter_var($explicitUrl, FILTER_VALIDATE_URL)) {
             $url = (string) $explicitUrl;
         } else {
-            // 1. Explicit env var (standard Laravel/framework APP_URL)
-            $envUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
-            if (!empty($envUrl) && filter_var($envUrl, FILTER_VALIDATE_URL)) {
-                if (!self::isLocalUrl((string) $envUrl) || self::isDevelopment()) {
-                    $url = (string) $envUrl;
+            // 1. Web server / reverse proxy host header (automatic on any web request)
+            $host = self::detectHttpHost();
+            if ($host !== null && $host !== '') {
+                $scheme = self::detectHttpScheme();
+                $url = "{$scheme}://{$host}";
+                if (!self::isLocalHost($host)) {
+                    self::cacheKnownAppUrl($url);
                 }
             }
 
-            // 2. Framework config (Laravel / Symfony)
+            // 2. Cached public URL from prior web requests
+            if ($url === null) {
+                $cached = self::getCachedAppUrl();
+                if (!empty($cached)) {
+                    $url = $cached;
+                }
+            }
+
+            // 3. Explicit env var (standard Laravel/framework APP_URL)
+            if ($url === null) {
+                $envUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? ($_SERVER['APP_URL'] ?? null));
+                if (!empty($envUrl) && filter_var($envUrl, FILTER_VALIDATE_URL)) {
+                    // Only use local APP_URL if we are truly in a local development environment
+                    if (!self::isLocalUrl((string) $envUrl) || !self::isServerEnvironment()) {
+                        $url = (string) $envUrl;
+                    }
+                }
+            }
+
+            // 4. Framework config (Laravel / Symfony)
             if ($url === null && function_exists('config')) {
                 try {
                     $configUrl = config('app.url');
                     if (!empty($configUrl) && filter_var($configUrl, FILTER_VALIDATE_URL)) {
-                        if (!self::isLocalUrl((string) $configUrl) || self::isDevelopment()) {
+                        if (!self::isLocalUrl((string) $configUrl) || !self::isServerEnvironment()) {
                             $url = (string) $configUrl;
                         }
                     }
@@ -605,24 +839,17 @@ class FeedpleSDK
                 }
             }
 
-            // 3. Web server / reverse proxy host header (automatic on any web request)
-            if ($url === null) {
-                $host = self::detectHttpHost();
-                if ($host !== null && $host !== '') {
-                    $scheme = self::detectHttpScheme();
-                    $url = "{$scheme}://{$host}";
-                }
-            }
-
-            // 4. Common cloud platform environment variables
+            // 5. Common cloud platform environment variables
             if ($url === null) {
                 $cloudVars = [
                     'RENDER_EXTERNAL_URL',
                     'RAILWAY_PUBLIC_DOMAIN',
                     'VERCEL_URL',
+                    'FLY_APP_NAME',
+                    'HEROKU_APP_DEFAULT_DOMAIN_NAME',
                 ];
                 foreach ($cloudVars as $var) {
-                    $val = getenv($var) ?: ($_ENV[$var] ?? null);
+                    $val = getenv($var) ?: ($_ENV[$var] ?? ($_SERVER[$var] ?? null));
                     if (!empty($val)) {
                         $val = (string) $val;
                         if (!str_starts_with($val, 'http://') && !str_starts_with($val, 'https://')) {
@@ -636,8 +863,20 @@ class FeedpleSDK
                 }
             }
 
-            if ($url === null && !empty($envUrl)) {
-                $url = (string) $envUrl;
+            // 6. Server environment auto-detection (e.g. cPanel /home/user/domain.com, $_SERVER['SERVER_NAME'])
+            if ($url === null) {
+                $serverUrl = self::detectServerAppUrl();
+                if (!empty($serverUrl)) {
+                    $url = $serverUrl;
+                }
+            }
+
+            // 7. Fallback to local envUrl if available
+            if ($url === null) {
+                $rawEnvUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? ($_SERVER['APP_URL'] ?? null));
+                if (!empty($rawEnvUrl) && filter_var($rawEnvUrl, FILTER_VALIDATE_URL)) {
+                    $url = (string) $rawEnvUrl;
+                }
             }
         }
 
