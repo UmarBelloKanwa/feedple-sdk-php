@@ -837,8 +837,7 @@ When `FeedpleSDK` launches a background worker:
 During codebase analysis, three areas were identified where public API usability could be improved:
 
 #### 1. Configurable Base Server URL & Connection Endpoint
-- **Current State**: `FEEDPLE_WS_URL` and `FEEDPLE_API_BASE_URL` in `src/FeedpleSDK.php` are top-level constants driven by `const FEEDPLE_DEV_ENV = true`.
-- **Usability Recommendation**: Expose a `$wsUrl` parameter in `FeedpleSDK` or read an environment variable (`FEEDPLE_WS_URL`) so developers can switch between Local, Staging, and Production environments without modifying SDK source code.
+- **Resolved**: `FEEDPLE_WS_URL` and `FEEDPLE_API_BASE_URL` dynamically respect `FEEDPLE_DEV_ENV=true` and custom overrides (`FEEDPLE_API_BASE_URL` / `FEEDPLE_WS_URL`) so developers can switch between Local, Staging, and Production environments without modifying SDK source code. Default is production Cloud Run.
 
 #### 2. Automatic Sensitive Column Filtering in `getSchema()`
 - **Current State**: `SchemaServices::filterSensitiveColumns()` exists as a utility method, but `getSchema()` returns unfiltered column definitions.

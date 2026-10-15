@@ -98,6 +98,50 @@ $sdk->stop();
 
 ---
 
+### Local Development & Testing Guide
+
+#### 1. For Application Developers (Testing Locally)
+- **Zero Configuration**: The SDK automatically detects local development when `APP_ENV=local` or when `APP_URL` points to `localhost`/`127.0.0.1`.
+- **Automatic WebSocket Selection**: Because Feedple Cloud (on the internet) cannot send inbound HTTP webhooks into a private laptop without public tunneling, the SDK's reachability guard automatically routes traffic over **WebSocket mode**.
+- **Running Locally**:
+  - **Zero extra commands**: When you run `php artisan serve`, the SDK automatically hooks in and boots the background WebSocket worker!
+  - **Or via CLI daemon**: Run `php artisan feedple:start`.
+
+#### 2. For Feedple Platform Developers (Local Backend + Local App)
+When testing against a local Feedple AI backend running on `http://localhost:8000`:
+- Add to `.env`:
+  ```env
+  FEEDPLE_DEV_ENV=true
+  ```
+  This immediately redirects the SDK to `http://localhost:8000/api/v1` (REST) and `ws://localhost:8000/api/v1/tenants/ws` (WebSocket) without touching SDK source code.
+
+- **To Test Webhook Transport Locally**:
+  ```env
+  FEEDPLE_DEV_ENV=true
+  FEEDPLE_TRANSPORT=webhook
+  APP_URL=http://127.0.0.1:8001
+  ```
+  1. Start `feedple-ai` on port 8000: `uvicorn app.main:app --port 8000 --reload`
+  2. Start Laravel on port 8001: `php artisan serve --port=8001`
+  3. Run sync: `php artisan feedple:sync`
+  Feedple AI on port 8000 will call your webhook bridge directly on port 8001.
+
+- **To Test WebSocket Transport Locally**:
+  ```env
+  FEEDPLE_DEV_ENV=true
+  FEEDPLE_TRANSPORT=websocket
+  ```
+  Start the daemon with `php artisan feedple:start` to connect to `ws://localhost:8000`.
+
+| Environment | Client App Location | Feedple Server | Default Transport | Required Settings |
+| :--- | :--- | :--- | :--- | :--- |
+| **Client Local Dev** | `localhost:8000` | Cloud Run | **WebSocket** | *None (Auto-detected)* |
+| **Client Production** | `yourdomain.com` | Cloud Run | **Webhook** | *None (Auto-detected)* |
+| **Core Dev (Webhook)** | `127.0.0.1:8001` | `localhost:8000` | **Webhook** | `FEEDPLE_DEV_ENV=true`<br>`FEEDPLE_TRANSPORT=webhook` |
+| **Core Dev (WebSocket)** | `127.0.0.1:8001` | `localhost:8000` | **WebSocket** | `FEEDPLE_DEV_ENV=true`<br>`FEEDPLE_TRANSPORT=websocket` |
+
+---
+
 ## Database Configuration (`DbConfig`)
 
 ```php

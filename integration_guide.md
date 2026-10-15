@@ -79,8 +79,42 @@ FEEDPLE_API_BASE_URL=https://feedple-ai-614817435356.us-central1.run.app/api/v1
 | `FEEDPLE_DEV_ENV` | Internal | When `true`, targets local backend (`http://localhost:8000`). Default `false` (targets Cloud Run). | `true` \| `false` |
 
 > [!TIP]
-> **Environment-Aware Transport & Reachability Guard (v1.0.18):**
+> **Environment-Aware Transport & Reachability Guard:**
 > When `FEEDPLE_TRANSPORT` is omitted, the SDK automatically selects `'websocket'` in local development (`isDevelopment()`) and `'webhook'` in production (`isProduction()`). If an application runs on `localhost` (e.g. `APP_URL=http://localhost:8000`) while connecting to Feedple Cloud, the SDK automatically forces `'websocket'` because Cloud Run cannot send inbound webhooks to `localhost`.
+
+### 💻 Local Development & Multi-Environment Testing Guide
+
+#### 1. End-User Local Testing (Connecting to Feedple Cloud)
+When clients are developing locally on their laptop:
+- **Zero Configuration Needed**: The SDK auto-detects `APP_ENV=local` or `localhost`/`127.0.0.1`.
+- **Automatic Fallback to WebSocket**: Because Feedple Cloud on the public internet cannot send HTTP webhooks into a private laptop, the reachability guard forces WebSocket mode.
+- **Booting the Worker**:
+  - `php artisan serve` automatically boots the background WebSocket worker without extra steps.
+  - Or manually run: `php artisan feedple:start`.
+
+#### 2. Core Platform Developers (Local Backend + Local Client)
+When developing the Feedple platform itself with both the AI backend (`feedple-ai` on `http://localhost:8000`) and client example (`feedple-examples` on `http://127.0.0.1:8001`) locally:
+
+Set in `.env`:
+```env
+FEEDPLE_DEV_ENV=true
+```
+This instructs the SDK to target `http://localhost:8000/api/v1` for REST and `ws://localhost:8000/api/v1/tenants/ws` for WebSockets.
+
+Because both servers are local, you can test **either transport locally**:
+- **Local Webhook Testing**:
+  ```env
+  FEEDPLE_DEV_ENV=true
+  FEEDPLE_TRANSPORT=webhook
+  APP_URL=http://127.0.0.1:8001
+  ```
+  Run Feedple AI on port 8000, Laravel on port 8001 (`php artisan serve --port=8001`), and run `php artisan feedple:sync`.
+- **Local WebSocket Testing**:
+  ```env
+  FEEDPLE_DEV_ENV=true
+  FEEDPLE_TRANSPORT=websocket
+  ```
+  Run `php artisan feedple:start`.
 
 ---
 
