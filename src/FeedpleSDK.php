@@ -573,72 +573,119 @@ class FeedpleSDK
 
     /**
      * Automatically detect the application base URL (e.g. 'https://example.com').
+     *
+     * @param string|null $explicitUrl Optional explicit application URL passed directly from SDK code/config.
      */
-    public static function detectAppUrl(): ?string
+    public static function detectAppUrl(?string $explicitUrl = null): ?string
     {
-        // 1. Explicit env var
-        $envUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
-        if (!empty($envUrl) && filter_var($envUrl, FILTER_VALIDATE_URL)) {
-            if (!self::isLocalUrl((string) $envUrl) || self::isDevelopment()) {
-                return rtrim((string) $envUrl, '/');
-            }
-        }
+        $url = null;
 
-        // 2. Framework config (Laravel / Symfony)
-        if (function_exists('config')) {
-            try {
-                $configUrl = config('app.url');
-                if (!empty($configUrl) && filter_var($configUrl, FILTER_VALIDATE_URL)) {
-                    if (!self::isLocalUrl((string) $configUrl) || self::isDevelopment()) {
-                        return rtrim((string) $configUrl, '/');
+        if (!empty($explicitUrl) && filter_var($explicitUrl, FILTER_VALIDATE_URL)) {
+            $url = (string) $explicitUrl;
+        } else {
+            // 1. Explicit env var (standard Laravel/framework APP_URL)
+            $envUrl = getenv('APP_URL') ?: ($_ENV['APP_URL'] ?? null);
+            if (!empty($envUrl) && filter_var($envUrl, FILTER_VALIDATE_URL)) {
+                if (!self::isLocalUrl((string) $envUrl) || self::isDevelopment()) {
+                    $url = (string) $envUrl;
+                }
+            }
+
+            // 2. Framework config (Laravel / Symfony)
+            if ($url === null && function_exists('config')) {
+                try {
+                    $configUrl = config('app.url');
+                    if (!empty($configUrl) && filter_var($configUrl, FILTER_VALIDATE_URL)) {
+                        if (!self::isLocalUrl((string) $configUrl) || self::isDevelopment()) {
+                            $url = (string) $configUrl;
+                        }
+                    }
+                } catch (\Throwable) {
+                    // Ignore if not a framework environment
+                }
+            }
+
+            // 3. Web server / reverse proxy host header (automatic on any web request)
+            if ($url === null) {
+                $host = self::detectHttpHost();
+                if ($host !== null && $host !== '') {
+                    $scheme = self::detectHttpScheme();
+                    $url = "{$scheme}://{$host}";
+                }
+            }
+
+            // 4. Common cloud platform environment variables
+            if ($url === null) {
+                $cloudVars = [
+                    'RENDER_EXTERNAL_URL',
+                    'RAILWAY_PUBLIC_DOMAIN',
+                    'VERCEL_URL',
+                ];
+                foreach ($cloudVars as $var) {
+                    $val = getenv($var) ?: ($_ENV[$var] ?? null);
+                    if (!empty($val)) {
+                        $val = (string) $val;
+                        if (!str_starts_with($val, 'http://') && !str_starts_with($val, 'https://')) {
+                            $val = 'https://' . $val;
+                        }
+                        if (filter_var($val, FILTER_VALIDATE_URL)) {
+                            $url = $val;
+                            break;
+                        }
                     }
                 }
-            } catch (\Throwable) {
-                // Ignore if not a framework environment
+            }
+
+            if ($url === null && !empty($envUrl)) {
+                $url = (string) $envUrl;
             }
         }
 
-        // 3. Web server / reverse proxy host header
-        $host = self::detectHttpHost();
-        if ($host !== null && $host !== '') {
-            $scheme = self::detectHttpScheme();
-            return "{$scheme}://{$host}";
+        if (empty($url)) {
+            return null;
         }
 
-        // 4. Common cloud platform environment variables
-        $cloudVars = [
-            'RENDER_EXTERNAL_URL',
-            'RAILWAY_PUBLIC_DOMAIN',
-            'VERCEL_URL',
-        ];
-        foreach ($cloudVars as $var) {
-            $val = getenv($var) ?: ($_ENV[$var] ?? null);
-            if (!empty($val)) {
-                $val = (string) $val;
-                if (!str_starts_with($val, 'http://') && !str_starts_with($val, 'https://')) {
-                    $val = 'https://' . $val;
-                }
-                if (filter_var($val, FILTER_VALIDATE_URL)) {
-                    return rtrim($val, '/');
-                }
-            }
+        $url = rtrim($url, '/');
+
+        // In production, ensure public URLs use HTTPS for secure webhook delivery
+        if (self::isProduction() && str_starts_with($url, 'http://') && !self::isLocalUrl($url)) {
+            $url = 'https://' . substr($url, 7);
         }
 
-        return !empty($envUrl) ? rtrim((string) $envUrl, '/') : null;
+        return $url;
     }
 
     /**
      * Automatically detect the full webhook bridge URL (e.g. 'https://example.com/api/feedple/bridge').
+     *
+     * @param string|null $bridgePath Optional custom bridge path (defaults to '/api/feedple/bridge').
+     * @param string|null $appUrl     Optional base app URL passed directly from SDK code/config.
      */
-    public static function detectWebhookUrl(?string $bridgePath = null): ?string
+    public static function detectWebhookUrl(?string $bridgePath = null, ?string $appUrl = null): ?string
     {
-        $baseUrl = self::detectAppUrl();
+        $baseUrl = self::detectAppUrl($appUrl);
         if (empty($baseUrl)) {
             return null;
         }
 
         $path = $bridgePath ?? self::getDefaultBridgePath();
         return rtrim($baseUrl, '/') . '/' . ltrim($path, '/');
+    }
+
+    /**
+     * Check if a path is a readable, non-empty CA certificate file without triggering
+     * open_basedir warnings or throwing on restricted systems.
+     */
+    public static function isValidCaFile(?string $path): bool
+    {
+        if (empty($path)) {
+            return false;
+        }
+        try {
+            return @file_exists($path) && @is_readable($path) && (@filesize($path) ?: 0) > 0;
+        } catch (\Throwable) {
+            return false;
+        }
     }
 
     /**
@@ -653,19 +700,19 @@ class FeedpleSDK
             ?? getenv('FEEDPLE_CA_BUNDLE')
             ?: ($_ENV['FEEDPLE_CA_BUNDLE'] ?? null);
 
-        if (!empty($configuredPath) && file_exists((string) $configuredPath)) {
+        if (self::isValidCaFile($configuredPath)) {
             return (string) $configuredPath;
         }
 
         // 2. Check if php.ini already specifies a valid curl.cainfo
         $curlCainfo = ini_get('curl.cainfo');
-        if (!empty($curlCainfo) && file_exists($curlCainfo)) {
+        if (self::isValidCaFile($curlCainfo)) {
             return $curlCainfo;
         }
 
         // 3. Check if php.ini already specifies a valid openssl.cafile
         $opensslCafile = ini_get('openssl.cafile');
-        if (!empty($opensslCafile) && file_exists($opensslCafile)) {
+        if (self::isValidCaFile($opensslCafile)) {
             return $opensslCafile;
         }
 
@@ -673,7 +720,7 @@ class FeedpleSDK
         if (class_exists('Composer\CaBundle\CaBundle')) {
             try {
                 $composerBundle = \Composer\CaBundle\CaBundle::getSystemCaRootBundlePath();
-                if (!empty($composerBundle) && file_exists($composerBundle)) {
+                if (self::isValidCaFile($composerBundle)) {
                     return $composerBundle;
                 }
             } catch (\Throwable) {
@@ -683,7 +730,7 @@ class FeedpleSDK
 
         // 5. Check bundled resources/cacert.pem in our own package
         $bundledPem = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'resources' . DIRECTORY_SEPARATOR . 'cacert.pem';
-        if (file_exists($bundledPem)) {
+        if (self::isValidCaFile($bundledPem)) {
             return $bundledPem;
         }
 
@@ -698,7 +745,7 @@ class FeedpleSDK
         ];
 
         foreach ($commonPaths as $path) {
-            if (file_exists($path)) {
+            if (self::isValidCaFile($path)) {
                 return $path;
             }
         }
@@ -830,7 +877,7 @@ class FeedpleSDK
         $body = curl_exec($ch);
         $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curlError = curl_error($ch);
-        curl_close($ch);
+        @curl_close($ch);
 
         if ($code >= 200 && $code < 300 && !empty($body)) {
             $data = json_decode((string) $body, true);
@@ -1268,7 +1315,7 @@ class FeedpleSDK
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curlError = curl_error($ch);
         $curlErrno = curl_errno($ch);
-        curl_close($ch);
+        @curl_close($ch);
 
         if ($responseBody === false || !empty($curlError)) {
             $msg = "HTTP schema sync failed: " . ($curlError ?: 'unknown network error');

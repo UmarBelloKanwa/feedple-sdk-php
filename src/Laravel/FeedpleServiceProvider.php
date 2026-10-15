@@ -288,17 +288,11 @@ class FeedpleServiceProvider extends ServiceProvider
             return;
         }
 
-        $appUrl = config('app.url') ?? env('APP_URL');
-        if (empty($appUrl) || FeedpleSDK::isLocalUrl((string) $appUrl) || !filter_var($appUrl, FILTER_VALIDATE_URL)) {
-            $appUrl = FeedpleSDK::detectAppUrl();
-        }
-        if (empty($appUrl) || FeedpleSDK::isLocalUrl((string) $appUrl) || !filter_var($appUrl, FILTER_VALIDATE_URL)) {
-            return;
-        }
+        $bridgePath = config('feedple.bridge_path') ?? env('FEEDPLE_BRIDGE_PATH', FeedpleSDK::DEFAULT_BRIDGE_PATH);
+        $bridgeUrl = FeedpleSDK::detectWebhookUrl($bridgePath);
 
-        // Ensure HTTPS on production public URLs (Feedple Cloud requires HTTPS for webhooks)
-        if (FeedpleSDK::isProduction() && str_starts_with((string) $appUrl, 'http://') && !FeedpleSDK::isLocalUrl((string) $appUrl)) {
-            $appUrl = 'https://' . substr((string) $appUrl, 7);
+        if (empty($bridgeUrl) || FeedpleSDK::isLocalUrl($bridgeUrl)) {
+            return;
         }
 
         $cacheFile = sys_get_temp_dir() . '/feedple_webhook_registered_' . substr(md5((string) $apiKey), 0, 10) . '.lock';
@@ -310,8 +304,6 @@ class FeedpleServiceProvider extends ServiceProvider
         try {
             $sdk = static::makeSdk('webhook');
             if ($sdk) {
-                $bridgePath = config('feedple.bridge_path') ?? env('FEEDPLE_BRIDGE_PATH', FeedpleSDK::DEFAULT_BRIDGE_PATH);
-                $bridgeUrl = rtrim((string) $appUrl, '/') . '/' . ltrim((string) $bridgePath, '/');
                 $sdk->syncSchemaHttp(null, false, $bridgeUrl);
                 @touch($cacheFile);
             }

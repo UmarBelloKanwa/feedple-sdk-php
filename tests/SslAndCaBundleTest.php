@@ -129,4 +129,56 @@ class SslAndCaBundleTest extends TestCase
         );
         $this->assertTrue($sdkTrueString->isSslVerified(), 'String "true" must evaluate to true');
     }
+
+    public function testResolveCaBundleSkipsEmptyOrUnreadableFile(): void
+    {
+        $emptyCa = sys_get_temp_dir() . '/empty_ca_' . bin2hex(random_bytes(4)) . '.pem';
+        file_put_contents($emptyCa, ''); // 0 bytes
+
+        try {
+            putenv("FEEDPLE_CA_BUNDLE={$emptyCa}");
+            $_ENV['FEEDPLE_CA_BUNDLE'] = $emptyCa;
+
+            $resolved = FeedpleSDK::resolveCaBundle();
+            // Should NOT return the empty file; falls through to bundled or system CA
+            $this->assertNotSame($emptyCa, $resolved);
+        } finally {
+            @unlink($emptyCa);
+        }
+    }
+
+    public function testWebSocketRecoversFromFailedCafileStream(): void
+    {
+        $loop = \React\EventLoop\Loop::get();
+        $logger = new \Psr\Log\NullLogger();
+
+        $ws = new \Feedple\Sdk\Core\FeedpleWebSocket(
+            wsUrl: 'wss://test.feedple.com',
+            apiKey: 'test-key',
+            loop: $loop,
+            logger: $logger,
+            verifySsl: true,
+            caBundle: '/non/existent/cacert.pem'
+        );
+
+        $ref = new \ReflectionClass($ws);
+        $caProp = $ref->getProperty('caBundle');
+        $this->assertSame('/non/existent/cacert.pem', $caProp->getValue($ws));
+
+        $connProp = $ref->getProperty('connector');
+        // Fake connector presence
+        $connProp->setValue($ws, new \Ratchet\Client\Connector($loop));
+        $this->assertNotNull($connProp->getValue($ws));
+
+        $method = $ref->getMethod('handleConnectFailure');
+        $errorMessage = "Connection to tls://feedple-ai:443 failed during TLS handshake: failed loading cafile stream: `/non/existent/cacert.pem', reconnecting in 1s";
+        $method->invoke($ws, new \RuntimeException($errorMessage), 1.0);
+
+        // Assert caBundle and connector were reset to null so fallback to system store happens
+        $this->assertNull($caProp->getValue($ws), 'caBundle must be reset to null when cafile stream fails');
+        $this->assertNull($connProp->getValue($ws), 'connector must be reset to null to rebuild with system store');
+
+        $ws->stop();
+    }
 }
+

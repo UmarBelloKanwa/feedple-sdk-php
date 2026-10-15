@@ -728,6 +728,18 @@ class FeedpleWebSocket
         $this->retryCount++;
 
         $msg = $e->getMessage();
+
+        // If OpenSSL failed to load the specified cafile stream, invalidate caBundle and connector
+        // so that the next reconnect attempt falls back cleanly to the system default certificate store.
+        if (str_contains($msg, 'failed loading cafile stream') && !empty($this->caBundle)) {
+            $this->logger->warning(
+                "Feedple: CA bundle '{$this->caBundle}' failed to load via OpenSSL stream. " .
+                "Discarding cafile and falling back to system default certificate store on next attempt."
+            );
+            $this->caBundle = null;
+            $this->connector = null;
+        }
+
         $isRateLimited = str_contains($msg, '429') || str_contains($msg, 'Rate exceeded') || str_contains($msg, 'Too Many Requests');
         if ($isRateLimited) {
             $delay = max($delay, 30.0);

@@ -32,7 +32,9 @@ class WebhookBridgeTest extends TestCase
         // Populate test table
         $pdo = $this->sdk->buildCompiler(); // test compiler access
         $method = new \ReflectionMethod(FeedpleSDK::class, 'getDb');
-        $method->setAccessible(true);
+        if (\PHP_VERSION_ID < 80500) {
+            $method->setAccessible(true);
+        }
         $rawPdo = $method->invoke($this->sdk);
         $rawPdo->exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);');
         $rawPdo->exec("INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');");
@@ -313,4 +315,24 @@ class WebhookBridgeTest extends TestCase
 
         unset($_SERVER['HTTP_HOST'], $_SERVER['HTTPS']);
     }
+
+    public function testExplicitAppUrlAndWebhookUrlOverrides(): void
+    {
+        $this->assertEquals(
+            'https://custom-app.com',
+            FeedpleSDK::detectAppUrl('https://custom-app.com')
+        );
+
+        $this->assertEquals(
+            'https://custom-app.com/api/feedple/bridge',
+            FeedpleSDK::detectWebhookUrl(appUrl: 'https://custom-app.com')
+        );
+
+        $this->assertEquals(
+            'https://custom-app.com/custom/bridge',
+            FeedpleSDK::detectWebhookUrl(bridgePath: '/custom/bridge', appUrl: 'https://custom-app.com')
+        );
+    }
 }
+
+
