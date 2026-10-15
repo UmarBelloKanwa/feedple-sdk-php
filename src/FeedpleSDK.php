@@ -362,6 +362,39 @@ class FeedpleSDK
      */
     public static function isDevelopment(): bool
     {
+        if (function_exists('app')) {
+            try {
+                $app = app();
+                if ($app && method_exists($app, 'environment')) {
+                    if ($app->environment('production', 'prod', 'staging', 'live')) {
+                        return false;
+                    }
+                    if ($app->environment('local', 'development', 'dev', 'testing', 'test')) {
+                        return true;
+                    }
+                }
+            } catch (\Throwable) {
+                // Ignore if container not booted
+            }
+        }
+
+        if (function_exists('config')) {
+            try {
+                $cfgEnv = config('app.env');
+                if (!empty($cfgEnv)) {
+                    $lower = strtolower(trim((string) $cfgEnv));
+                    if (in_array($lower, ['production', 'prod', 'staging', 'live'], true)) {
+                        return false;
+                    }
+                    if (in_array($lower, ['local', 'development', 'dev', 'testing', 'test'], true)) {
+                        return true;
+                    }
+                }
+            } catch (\Throwable) {
+                // Ignore
+            }
+        }
+
         $appEnv = getenv('APP_ENV') ?: ($_ENV['APP_ENV'] ?? null);
         if (!empty($appEnv)) {
             $lower = strtolower(trim((string) $appEnv));
@@ -1193,14 +1226,16 @@ class FeedpleSDK
         $endpoint = rtrim($baseUrl, '/') . '/tenants/schema';
 
         // transport_mode tells the backend how to deliver runtime queries.
-        // In websocket mode we never register a webhook URL.
         $payloadData = ['schema' => $schema, 'transport_mode' => $this->transport];
         $resolvedWebhookUrl = $webhookUrl;
-        if ($this->transport === 'webhook' && ($resolvedWebhookUrl === null || $resolvedWebhookUrl === '')) {
-            $resolvedWebhookUrl = self::detectWebhookUrl();
-        }
-        if ($this->transport === 'webhook' && !empty($resolvedWebhookUrl)) {
+        if (!empty($resolvedWebhookUrl)) {
             $payloadData['webhook_url'] = $resolvedWebhookUrl;
+            $payloadData['transport_mode'] = 'webhook';
+        } elseif ($this->transport === 'webhook') {
+            $resolvedWebhookUrl = self::detectWebhookUrl();
+            if (!empty($resolvedWebhookUrl)) {
+                $payloadData['webhook_url'] = $resolvedWebhookUrl;
+            }
         }
         $payload = json_encode($payloadData, JSON_THROW_ON_ERROR);
 

@@ -202,28 +202,30 @@ class FeedpleSdkTest extends TestCase
             }
         };
 
-        // 1a. Local app → local backend, webhook (reachable, honoured)
-        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_DEV_ENV' => 'true', 'FEEDPLE_TRANSPORT' => 'webhook']);
-        $this->assertSame('http://localhost:8000/api/v1', FeedpleSDK::getApiBaseUrl());
-        $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
+        try {
+            // 1a. Local app → local backend, webhook (reachable, honoured)
+            $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_DEV_ENV' => 'true', 'FEEDPLE_TRANSPORT' => 'webhook']);
+            $this->assertSame('http://localhost:8000/api/v1', FeedpleSDK::getApiBaseUrl());
+            $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
 
-        // 1b. Local app → local backend, websocket (default in dev)
-        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_DEV_ENV' => 'true']);
-        $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
+            // 1b. Local app → local backend, websocket (default in dev)
+            $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_DEV_ENV' => 'true']);
+            $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
 
-        // 2. Local app → production backend: always websocket, even if webhook requested
-        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001']);
-        $this->assertStringStartsWith('https://', FeedpleSDK::getApiBaseUrl());
-        $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
-        $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_TRANSPORT' => 'webhook']);
-        $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
+            // 2. Local app → production backend: always websocket, even if webhook requested
+            $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001']);
+            $this->assertStringStartsWith('https://', FeedpleSDK::getApiBaseUrl());
+            $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
+            $set(['APP_ENV' => 'local', 'APP_URL' => 'http://127.0.0.1:8001', 'FEEDPLE_TRANSPORT' => 'webhook']);
+            $this->assertSame('websocket', FeedpleSDK::getDefaultTransport());
 
-        // 3. Production app → production backend: webhook
-        $set(['APP_ENV' => 'production', 'APP_URL' => 'https://myapp.com']);
-        $this->assertStringStartsWith('https://', FeedpleSDK::getApiBaseUrl());
-        $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
-
-        $set([]);
+            // 3. Production app → production backend: webhook
+            $set(['APP_ENV' => 'production', 'APP_URL' => 'https://myapp.com']);
+            $this->assertStringStartsWith('https://', FeedpleSDK::getApiBaseUrl());
+            $this->assertSame('webhook', FeedpleSDK::getDefaultTransport());
+        } finally {
+            $set([]);
+        }
     }
 
     public function testConstructorAcceptsAllConnectionOptions(): void
