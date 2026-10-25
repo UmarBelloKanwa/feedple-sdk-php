@@ -161,6 +161,20 @@ What `feedple:sync` does:
 3. Sends the schema to Feedple Cloud via `POST /api/v1/tenants/schema/sync`.
 4. Feedple Cloud registers the webhook URL and provisions `FEEDPLE_WEBHOOK_SECRET` automatically!
 
+#### Artisan Commands Reference
+
+```bash
+php artisan feedple:sync                # Synchronize schema and register webhook bridge
+php artisan feedple:sync --force        # Force schema sync even if local hash hasn't changed
+php artisan feedple:status              # Check SDK health, transport, and worker status
+php artisan feedple:start               # Start WebSocket worker daemon (in local development)
+php artisan feedple:start --tail        # Start WebSocket worker and stream live logs
+php artisan feedple:start --force       # Force start WebSocket worker even if transport is webhook
+php artisan feedple:stop                # Stop background WebSocket worker daemon
+```
+
+> **Note on Webhook Mode:** In Webhook mode (`FEEDPLE_TRANSPORT=webhook`), `php artisan feedple:start` informs you that webhook mode is stateless and does not need a background daemon. Use `--force` if you wish to run a WebSocket worker daemon anyway.
+
 ---
 
 ### Pattern 2: Vanilla PHP / Nginx / Apache / cPanel

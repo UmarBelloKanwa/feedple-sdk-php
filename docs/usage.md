@@ -471,6 +471,11 @@ $sdk = new FeedpleSDK(
 );
 ```
 
+> [!NOTE]
+> **OpenSSL Stream Failure Fallback & `open_basedir` Safety (v1.0.30)**:
+> - **`FeedpleSDK::isValidCaFile(?string $path)`**: Validates readability and non-empty size safely without triggering PHP `open_basedir` warnings on restricted shared hosting.
+> - **Self-Healing Fallback**: If OpenSSL fails loading a custom CA bundle file stream on connection (`failed loading cafile stream`), the WebSocket worker discards the custom cafile and cleanly falls back to the system default certificate store on subsequent reconnects.
+
 ---
 
 ## 7. Common Workflows
@@ -554,12 +559,17 @@ php artisan feedple:status
 php artisan feedple:start
 php artisan feedple:start --tail
 
+# Force start WebSocket daemon even if transport is configured for webhook mode
+php artisan feedple:start --force
+
 # Stop background WebSocket daemon
 php artisan feedple:stop
 
 # (Optional) Publish configuration file to config/feedple.php
 php artisan vendor:publish --tag=feedple-config
 ```
+
+> **Intelligent Webhook Mode Guard (v1.0.30):** If configured for Webhook mode (`FEEDPLE_TRANSPORT=webhook`), running `php artisan feedple:start` informs you that webhook mode is stateless and does not need a background daemon. To start a WebSocket worker anyway, use `--force`.
 
 #### Production Zero-Maintenance Auto-Registration
 When `FEEDPLE_TRANSPORT=webhook` in production, the SDK hooks into Laravel's `app->terminating()` lifecycle to automatically synchronize and register your webhook bridge URL with Feedple Cloud with a 24-hour cache lock.
@@ -681,14 +691,26 @@ class FeedpleSDK
     public function log(string $level, string $message): void;
     public static function runWorker(string $controlFilePath): void;
 
-    // Static Environment & Reachability Helpers (v1.0.18)
-    public static function getDefaultTransport(): string;
+    // Static Environment & Reachability Helpers (v1.0.30)
+    public static function isCliDevServer(): bool;
+    public static function isLocalDevTool(): bool;
+    public static function isServerEnvironment(): bool;
+    public static function isTesting(): bool;
     public static function isDevelopment(): bool;
     public static function isProduction(): bool;
+    public static function getDefaultTransport(): string;
     public static function isWebhookReachable(): bool;
     public static function isLocalApp(): bool;
     public static function isLocalBackend(): bool;
     public static function isLocalUrl(string $url): bool;
+    public static function isLocalHost(string $host): bool;
+    public static function detectHttpHost(): ?string;
+    public static function detectHttpScheme(): string;
+    public static function detectAppUrl(?string $explicitUrl = null): ?string;
+    public static function detectWebhookUrl(?string $bridgePath = null, ?string $appUrl = null): ?string;
+    public static function isValidCaFile(?string $path): bool;
+    public static function resolveCaBundle(?string $customPath = null): ?string;
+    public static function isSslVerificationEnabled(): bool;
     public static function isDevEnv(): bool;
     public static function getWsUrl(): string;
     public static function getApiBaseUrl(): string;

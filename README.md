@@ -237,9 +237,14 @@ php artisan feedple:status
 php artisan feedple:start
 php artisan feedple:start --tail
 
+# Force start daemon even if transport is configured for webhook mode
+php artisan feedple:start --force
+
 # Stop background worker daemon
 php artisan feedple:stop
 ```
+
+> **Note on Webhook Mode:** If your application is configured for Webhook mode (`FEEDPLE_TRANSPORT=webhook`), running `php artisan feedple:start` informs you that webhook mode is stateless and does not require a background daemon, directing you to `php artisan feedple:sync`. Pass `--force` if you wish to run a WebSocket worker daemon anyway.
 
 ---
 
@@ -335,13 +340,22 @@ class FeedpleSDK
     public function getCaBundlePath(): ?string;
 
     // Helpers
-    public static function getDefaultTransport(): string;
+    public static function isCliDevServer(): bool;
+    public static function isLocalDevTool(): bool;
+    public static function isServerEnvironment(): bool;
+    public static function isTesting(): bool;
     public static function isDevelopment(): bool;
     public static function isProduction(): bool;
+    public static function getDefaultTransport(): string;
     public static function isWebhookReachable(): bool;
     public static function isLocalApp(): bool;
+    public static function isLocalUrl(string $url): bool;
+    public static function detectAppUrl(?string $explicitUrl = null): ?string;
+    public static function detectWebhookUrl(?string $bridgePath = null, ?string $appUrl = null): ?string;
+    public static function isValidCaFile(?string $path): bool;
+    public static function resolveCaBundle(?string $customPath = null): ?string;
+    public static function isSslVerificationEnabled(): bool;
     public static function isDevEnv(): bool;
-    public static function resolveCaBundle(): ?string;
 }
 ```
 
