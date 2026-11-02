@@ -276,8 +276,8 @@ The CLI automatically detects your project's `.env` file and connects using stan
 ## Environment Configuration
 
 By default, the SDK connects to **Feedple Cloud**:
-- **API Base URL**: `https://feedple-ai-614817435356.us-central1.run.app/api/v1`
-- **WebSocket URL**: `wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws`
+- **API Base URL**: `https://api.feedple.com/api/v1`
+- **WebSocket URL**: `wss://api.feedple.com/api/v1/tenants/ws`
 
 To connect to a **local Feedple server** during development, set in `.env`:
 

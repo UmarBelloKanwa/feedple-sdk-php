@@ -95,10 +95,10 @@ class FeedpleSdkTest extends TestCase
 
         $expectedApiUrl = \Feedple\Sdk\FEEDPLE_DEV_ENV
             ? 'http://localhost:8000/api/v1'
-            : 'https://feedple-ai-614817435356.us-central1.run.app/api/v1';
+            : 'https://api.feedple.com/api/v1';
         $expectedWsUrl = \Feedple\Sdk\FEEDPLE_DEV_ENV
             ? 'ws://localhost:8000/api/v1/tenants/ws'
-            : 'wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws';
+            : 'wss://api.feedple.com/api/v1/tenants/ws';
 
         $this->assertEquals($expectedApiUrl, FeedpleSDK::DEFAULT_API_BASE_URL);
         $this->assertEquals($expectedWsUrl, FeedpleSDK::DEFAULT_WS_URL);
@@ -128,8 +128,8 @@ class FeedpleSdkTest extends TestCase
             putenv('FEEDPLE_DEV_ENV=false');
             $_ENV['FEEDPLE_DEV_ENV'] = 'false';
             $this->assertFalse(FeedpleSDK::isDevEnv());
-            $this->assertEquals('https://feedple-ai-614817435356.us-central1.run.app/api/v1', FeedpleSDK::getApiBaseUrl());
-            $this->assertEquals('wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws', FeedpleSDK::getWsUrl());
+            $this->assertEquals('https://api.feedple.com/api/v1', FeedpleSDK::getApiBaseUrl());
+            $this->assertEquals('wss://api.feedple.com/api/v1/tenants/ws', FeedpleSDK::getWsUrl());
         } finally {
             if ($orig !== false) {
                 putenv("FEEDPLE_DEV_ENV={$orig}");

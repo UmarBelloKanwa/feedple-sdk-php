@@ -19,8 +19,8 @@ use React\EventLoop\LoopInterface;
 /** @internal */
 const FEEDPLE_DEV_ENV = false;
 
-const FEEDPLE_API_BASE_URL = 'https://feedple-ai-614817435356.us-central1.run.app/api/v1';
-const FEEDPLE_WS_URL       = 'wss://feedple-ai-614817435356.us-central1.run.app/api/v1/tenants/ws';
+const FEEDPLE_API_BASE_URL = 'https://api.feedple.com/api/v1';
+const FEEDPLE_WS_URL       = 'wss://api.feedple.com/api/v1/tenants/ws';
 
 /**
  * Main entry point for the Feedple PHP SDK — framework-agnostic, OS-agnostic.

@@ -67,7 +67,7 @@ FEEDPLE_WEBHOOK_SECRET=whsec_your_webhook_signing_secret
 # Transport configuration
 FEEDPLE_TRANSPORT=webhook
 FEEDPLE_BRIDGE_PATH=/api/feedple/bridge
-FEEDPLE_API_BASE_URL=https://feedple-ai-614817435356.us-central1.run.app/api/v1
+FEEDPLE_API_BASE_URL=https://api.feedple.com/api/v1
 ```
 
 | Variable | Direction | Purpose | Format |
