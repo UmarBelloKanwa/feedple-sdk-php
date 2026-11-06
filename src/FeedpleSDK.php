@@ -1798,16 +1798,15 @@ class FeedpleSDK
 
         $this->log('info', sprintf('Feedple: IR executed (%d rows, %dms)', count($rows), $durationMs));
 
-        // If the query returned a single aggregate row (e.g. COUNT(*), COUNT(col)),
-        // the actual "count" should be the aggregate value in that row, not the
-        // number of PHP rows returned (which would always be 1 for aggregates).
+        // Only a lone COUNT aggregate (no GROUP BY) is a scalar: report its value as the
+        // count. Any other single-row result (e.g. SELECT id ... LIMIT 1) has count =
+        // number of rows, never the column's value.
         $rowCount = count($rows);
-        if ($rowCount === 1) {
+        if ($rowCount === 1 && self::isScalarCountQuery($ir)) {
             $onlyRow = reset($rows);
             if (is_array($onlyRow)) {
                 $vals = array_values($onlyRow);
-                // Single-column result whose value is numeric → it's an aggregate scalar
-                if (count($vals) === 1 && is_numeric($vals[0])) {
+                if (count($vals) === 1 && is_numeric($vals[0]) && (string) (int) $vals[0] === (string) $vals[0] && (int) $vals[0] >= 0) {
                     $rowCount = (int) $vals[0];
                 }
             }
@@ -1818,6 +1817,32 @@ class FeedpleSDK
             'count'       => $rowCount,
             'duration_ms' => $durationMs,
         ];
+    }
+
+    /**
+     * True for `SELECT COUNT(...)` with exactly one field and no GROUP BY.
+     *
+     * @param array<string, mixed> $ir
+     */
+    private static function isScalarCountQuery(array $ir): bool
+    {
+        $groupBy = $ir['group_by'] ?? [];
+        $groupBy = is_array($groupBy) ? $groupBy : [$groupBy];
+        foreach ($groupBy as $g) {
+            if (trim((string) $g) !== '') {
+                return false;
+            }
+        }
+        $fields = $ir['fields'] ?? [];
+        if (!is_array($fields) || count($fields) !== 1) {
+            return false;
+        }
+        $f = reset($fields);
+        $expr = is_array($f) ? ($f['expression'] ?? null) : null;
+        if ($expr !== null && stripos((string) $expr, 'count') !== false) {
+            return true;
+        }
+        return is_array($f) && preg_match('/^\s*COUNT\s*\(/i', (string) ($f['column'] ?? '')) === 1;
     }
 
     private function verifyDbConnection(): void
