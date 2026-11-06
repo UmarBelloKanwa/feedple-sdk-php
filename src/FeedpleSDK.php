@@ -1050,25 +1050,71 @@ class FeedpleSDK
             return $this->webhookSecret;
         }
 
-        $cacheFile = $this->webhookSecretCachePath();
-        if (is_file($cacheFile)) {
-            $cached = @file_get_contents($cacheFile);
-            if (!empty($cached)) {
-                $decoded = json_decode($cached, true);
-                if (is_array($decoded) && !empty($decoded['webhook_secret'])) {
-                    $this->webhookSecret = (string) $decoded['webhook_secret'];
-                    return $this->webhookSecret;
-                }
-            }
+        $cached = $this->readCachedWebhookSecret();
+        if ($cached !== null) {
+            $this->webhookSecret = $cached;
+            return $this->webhookSecret;
+        }
+
+        // Don't hit the network on every (possibly unauthenticated) request while the
+        // fetch is failing: back off for 60s after a miss, tracked on disk because each
+        // PHP web request is a fresh process.
+        $missFile = $this->webhookSecretCachePath() . '.miss';
+        if (is_file($missFile) && (time() - (int) @filemtime($missFile)) < 60) {
+            return null;
         }
 
         // Auto-fetch from Feedple Cloud using the API key
         try {
-            return $this->fetchWebhookSecret();
+            $secret = $this->fetchWebhookSecret();
         } catch (\Throwable $e) {
             $this->log('debug', 'Feedple: auto-fetch webhook secret failed: ' . $e->getMessage());
+            $secret = null;
+        }
+        if ($secret === null || $secret === '') {
+            @touch($missFile);
             return null;
         }
+        @unlink($missFile);
+
+        return $secret;
+    }
+
+    /**
+     * Read the cached webhook secret, refusing files another local user could have
+     * planted (symlinks, files owned by someone else, group/world-writable files).
+     * An attacker-controlled secret would let them forge signed webhook requests.
+     */
+    private function readCachedWebhookSecret(): ?string
+    {
+        $cacheFile = $this->webhookSecretCachePath();
+
+        if (PHP_OS_FAMILY !== 'Windows') {
+            $stat = @lstat($cacheFile);
+            if ($stat === false) {
+                return null;
+            }
+            $isLink = ($stat['mode'] & 0170000) === 0120000;
+            $uid = function_exists('posix_geteuid') ? posix_geteuid() : (int) @fileowner(__FILE__);
+            if ($isLink || $stat['uid'] !== $uid || ($stat['mode'] & 0022) !== 0) {
+                $this->log('warning', "Feedple: ignoring insecure webhook secret cache {$cacheFile} "
+                    . '(symlink, not owned by this user, or group/world-writable)');
+                return null;
+            }
+        }
+
+        if (!is_file($cacheFile)) {
+            return null;
+        }
+        $raw = @file_get_contents($cacheFile);
+        if (empty($raw)) {
+            return null;
+        }
+        $decoded = json_decode($raw, true);
+        if (is_array($decoded) && !empty($decoded['webhook_secret'])) {
+            return (string) $decoded['webhook_secret'];
+        }
+        return null;
     }
 
     /**
@@ -1078,11 +1124,26 @@ class FeedpleSDK
     {
         $this->webhookSecret = trim($secret);
         $cacheFile = $this->webhookSecretCachePath();
-        @file_put_contents($cacheFile, json_encode([
+
+        // Write to a fresh 0600 temp file (exclusive create) and rename over the target:
+        // never follows or truncates a pre-existing symlink/file at the cache path.
+        $tmp = $cacheFile . '.' . getmypid() . '.' . bin2hex(random_bytes(4)) . '.tmp';
+        $json = json_encode([
             'webhook_secret' => $this->webhookSecret,
             'updated_at'     => date('c'),
-        ], JSON_PRETTY_PRINT));
-        @chmod($cacheFile, 0600);
+        ], JSON_PRETTY_PRINT);
+
+        $fp = @fopen($tmp, 'xb');
+        if ($fp === false) {
+            return;
+        }
+        @chmod($tmp, 0600);
+        $ok = fwrite($fp, (string) $json) !== false;
+        fclose($fp);
+
+        if (!$ok || !@rename($tmp, $cacheFile)) {
+            @unlink($tmp);
+        }
     }
 
     /**

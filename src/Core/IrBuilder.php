@@ -340,7 +340,10 @@ class IrBuilder
 
         if (isset($comparisonMap[$operator])) {
             // Check if value is a raw SQL datetime expression like CURRENT_TIMESTAMP - INTERVAL '30 days' or NOW()
-            if (is_string($value) && preg_match('/^(CURRENT_TIMESTAMP|NOW\(\)|CURRENT_DATE)\b/i', trim($value))) {
+            // The WHOLE value must be a known-safe datetime expression (optionally +/- one
+            // INTERVAL literal). A prefix-only match would let "NOW(); DROP TABLE x" through
+            // as raw SQL; anything else is bound as a normal parameter below.
+            if (is_string($value) && preg_match('/^(CURRENT_TIMESTAMP|NOW\(\)|CURRENT_DATE)(\s*[-+]\s*INTERVAL\s*[\'"]\d+\s*[a-zA-Z]+[\'"])?$/i', trim($value))) {
                 $dtExpr = $value;
                 if ($driver === 'mysql') {
                     $dtExpr = preg_replace_callback(
