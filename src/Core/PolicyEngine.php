@@ -56,10 +56,14 @@ class PolicyEngine
             return;
         }
 
-        // Collect base table + all joined tables (mirrors Python implementation)
+        // Collect base table + all joined tables + IR v2 relation tables (mirrors Python implementation)
         $tables = [$ir['table'] ?? ''];
         foreach (($ir['joins'] ?? []) as $join) {
             $tables[] = $join['table'] ?? '';
+        }
+        // IR v2: relation_aggregates read child tables, so they need the same check as joins
+        foreach (($ir['relation_aggregates'] ?? []) ?: [] as $rel) {
+            $tables[] = is_array($rel) ? (string) ($rel['table'] ?? '') : '';
         }
 
         foreach ($tables as $table) {

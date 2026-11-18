@@ -47,6 +47,30 @@ class IrBuilder
      */
     public static function buildQueryFromIr(array $ir, ?string $driver = null): array
     {
+        $driver = $driver ? strtolower($driver) : null;
+
+        $thenAggregate = $ir['then_aggregate'] ?? null;
+        if (!empty($thenAggregate)) {
+            self::v2Dialect($driver, 'then_aggregate');
+            if (!is_array($thenAggregate)) {
+                throw new \InvalidArgumentException("Invalid IR v2 then_aggregate: must be an object");
+            }
+            // Inner query is built as usual, but WITHOUT order_by / limit / offset.
+            $inner = self::buildSelectQuery($ir, $driver, false);
+            return self::wrapThenAggregate($thenAggregate, $inner, $ir, $driver);
+        }
+
+        return self::buildSelectQuery($ir, $driver, true);
+    }
+
+    /**
+     * Build the (v1 + v2 group_keys / relation_aggregates) SELECT statement.
+     *
+     * @param  array<string, mixed> $ir
+     * @return array{sql: string, params: list<mixed>}
+     */
+    private static function buildSelectQuery(array $ir, ?string $driver, bool $withOrderAndLimit): array
+    {
         if (($ir['operation'] ?? '') !== 'query') {
             throw new \InvalidArgumentException(
                 "Unsupported IR operation: " . ($ir['operation'] ?? 'null')
@@ -58,11 +82,43 @@ class IrBuilder
             throw new \InvalidArgumentException("IR is missing primary 'table'");
         }
 
-        $driver = $driver ? strtolower($driver) : null;
         $params = [];
+
+        // IR v2 keys (validated up-front so unsupported dialects fail before any SQL is built)
+        $groupKeys = $ir['group_keys'] ?? null;
+        $relationAggregates = $ir['relation_aggregates'] ?? null;
+        $groupKeyExprs = [];   // list<array{expr: string, alias: string}>
+        $relationJoins = [];   // list<array{sql: string, params: list<mixed>}>
+        $relationSelects = []; // list<string>
+        if (!empty($groupKeys)) {
+            $dialect = self::v2Dialect($driver, 'group_keys');
+            if (!is_array($groupKeys)) {
+                throw new \InvalidArgumentException("Invalid IR v2 group_keys: must be a list");
+            }
+            foreach (array_values($groupKeys) as $key) {
+                $groupKeyExprs[] = self::buildGroupKey($key, $baseTable, $dialect, $driver);
+            }
+        }
+        if (!empty($relationAggregates)) {
+            self::v2Dialect($driver, 'relation_aggregates');
+            if (!is_array($relationAggregates)) {
+                throw new \InvalidArgumentException("Invalid IR v2 relation_aggregates: must be a list");
+            }
+            foreach (array_values($relationAggregates) as $i => $rel) {
+                [$joinSql, $joinParams, $selects] = self::buildRelationAggregate($rel, $i, $baseTable, $driver);
+                $relationJoins[] = ['sql' => $joinSql, 'params' => $joinParams];
+                array_push($relationSelects, ...$selects);
+            }
+        }
 
         // 1. SELECT clause
         $selectClause = self::buildSelectClause($ir['fields'] ?? [], $baseTable, $ir['joins'] ?? [], $driver);
+        foreach ($groupKeyExprs as $gk) {
+            $selectClause .= ', ' . $gk['expr'] . ' AS ' . self::quoteIdentifier($gk['alias'], $driver);
+        }
+        foreach ($relationSelects as $relSelect) {
+            $selectClause .= ', ' . $relSelect;
+        }
 
         // 2. FROM clause
         $sql = "SELECT {$selectClause} FROM " . self::quoteIdentifier($baseTable, $driver);
@@ -86,6 +142,13 @@ class IrBuilder
             $pkQuoted = self::quoteIdentifier('id', $driver);
             $sql     .= " LEFT JOIN ({$unionSql}) AS event_stream ON event_stream.entity_ref = {$baseTblQuoted}.{$pkQuoted}";
         }
+
+        // 3c. IR v2 relation_aggregates: LEFT JOIN pre-aggregated child subqueries (no fan-out)
+        foreach ($relationJoins as $rj) {
+            $sql   .= $rj['sql'];
+            $params = array_merge($params, $rj['params']);
+        }
+
         // 4. WHERE clause (filters AND filter_groups)
         $whereParts = [];
         if (!empty($ir['filters'])) {
@@ -120,18 +183,22 @@ class IrBuilder
         }
 
         // 5. GROUP BY clause
+        $cols = [];
         if (!empty($ir['group_by'])) {
             $groupBy = is_array($ir['group_by']) ? $ir['group_by'] : [$ir['group_by']];
-            $cols    = [];
             foreach ($groupBy as $gb) {
                 $gb = trim((string) $gb);
                 if ($gb !== '') {
                     $cols[] = self::resolveColumnRef($gb, $driver);
                 }
             }
-            if (!empty($cols)) {
-                $sql .= ' GROUP BY ' . implode(', ', $cols);
-            }
+        }
+        // IR v2 group_keys are grouped after any v1 group_by columns
+        foreach ($groupKeyExprs as $gk) {
+            $cols[] = $gk['expr'];
+        }
+        if (!empty($cols)) {
+            $sql .= ' GROUP BY ' . implode(', ', $cols);
         }
 
         // 6. HAVING clause
@@ -141,6 +208,10 @@ class IrBuilder
                 $sql    .= " HAVING {$havingSql}";
                 $params  = array_merge($params, $havingParams);
             }
+        }
+
+        if (!$withOrderAndLimit) {
+            return ['sql' => $sql, 'params' => $params];
         }
 
         // 7. ORDER BY clause
@@ -176,6 +247,347 @@ class IrBuilder
         }
 
         return ['sql' => $sql, 'params' => $params];
+    }
+
+    // ── IR v2 helpers ──────────────────────────────────────────────────────
+
+    /** IR version implemented by this builder; reported as "ir_version" in every IR result payload. */
+    public const IR_VERSION = 2;
+
+    /** date_bucket expressions per dialect ("{c}" = quoted, table-qualified column). */
+    private const DATE_BUCKET_SQL = [
+        'postgres' => [
+            'hour'    => "date_trunc('hour', {c})",
+            'day'     => "date_trunc('day', {c})",
+            'week'    => "date_trunc('week', {c})",
+            'month'   => "date_trunc('month', {c})",
+            'quarter' => "date_trunc('quarter', {c})",
+            'year'    => "date_trunc('year', {c})",
+        ],
+        'mysql' => [
+            'hour'    => "DATE_FORMAT({c}, '%Y-%m-%d %H:00:00')",
+            'day'     => "DATE({c})",
+            'week'    => "DATE_SUB(DATE({c}), INTERVAL WEEKDAY({c}) DAY)",
+            'month'   => "DATE_FORMAT({c}, '%Y-%m-01')",
+            'quarter' => "MAKEDATE(YEAR({c}), 1) + INTERVAL (QUARTER({c}) - 1) QUARTER",
+            'year'    => "DATE_FORMAT({c}, '%Y-01-01')",
+        ],
+        'sqlite' => [
+            'hour'    => "strftime('%Y-%m-%d %H:00:00', {c})",
+            'day'     => "date({c})",
+            'week'    => "date({c}, '-' || ((CAST(strftime('%w', {c}) AS INTEGER) + 6) % 7) || ' days')",
+            'month'   => "strftime('%Y-%m-01', {c})",
+            'quarter' => "printf('%04d-%02d-01', CAST(strftime('%Y', {c}) AS INTEGER), ((CAST(strftime('%m', {c}) AS INTEGER) - 1) / 3) * 3 + 1)",
+            'year'    => "strftime('%Y-01-01', {c})",
+        ],
+    ];
+
+    /** date_part expressions per dialect ("{c}" = quoted, table-qualified column). */
+    private const DATE_PART_SQL = [
+        'postgres' => [
+            'hour_of_day'     => "CAST(EXTRACT(HOUR FROM {c}) AS INTEGER)",
+            'day_of_week'     => "CAST(EXTRACT(ISODOW FROM {c}) AS INTEGER)",
+            'month_of_year'   => "CAST(EXTRACT(MONTH FROM {c}) AS INTEGER)",
+            'quarter_of_year' => "CAST(EXTRACT(QUARTER FROM {c}) AS INTEGER)",
+        ],
+        'mysql' => [
+            'hour_of_day'     => "HOUR({c})",
+            'day_of_week'     => "(WEEKDAY({c}) + 1)",
+            'month_of_year'   => "MONTH({c})",
+            'quarter_of_year' => "QUARTER({c})",
+        ],
+        'sqlite' => [
+            'hour_of_day'     => "CAST(strftime('%H', {c}) AS INTEGER)",
+            'day_of_week'     => "((CAST(strftime('%w', {c}) AS INTEGER) + 6) % 7 + 1)",
+            'month_of_year'   => "CAST(strftime('%m', {c}) AS INTEGER)",
+            'quarter_of_year' => "((CAST(strftime('%m', {c}) AS INTEGER) + 2) / 3)",
+        ],
+    ];
+
+    /** Aggregate functions allowed inside relation_aggregates[].aggregates. */
+    private const RELATION_FUNCTIONS = ['COUNT', 'COUNT DISTINCT', 'SUM', 'AVG', 'MIN', 'MAX'];
+
+    /** Reducer functions allowed in then_aggregate.reducers. */
+    private const REDUCER_FUNCTIONS = ['SUM', 'AVG', 'MIN', 'MAX', 'COUNT'];
+
+    private static function unsupported(string $what): \InvalidArgumentException
+    {
+        return new \InvalidArgumentException("Unsupported IR v2 feature: {$what}");
+    }
+
+    /**
+     * Map a PDO driver name to a v2 dialect, or throw for drivers without v2 support.
+     */
+    private static function v2Dialect(?string $driver, string $feature): string
+    {
+        switch ($driver) {
+            case 'mysql':
+                return 'mysql';
+            case 'pgsql':
+                return 'postgres';
+            case 'sqlite':
+                return 'sqlite';
+        }
+        throw self::unsupported("{$feature} is not supported for database driver '" . ($driver ?? 'unknown') . "'");
+    }
+
+    /**
+     * Resolve a plain column reference ("col" or "table.col") to a quoted, table-qualified column.
+     * Function-call syntax is NOT accepted here (unlike resolveColumnRef).
+     *
+     * @param string|null $requiredTable If set, a qualified reference must use exactly this table.
+     */
+    private static function qualifiedColumn(mixed $ref, string $defaultTable, ?string $driver, ?string $requiredTable = null): string
+    {
+        if (!is_string($ref) || trim($ref) === '') {
+            throw new \InvalidArgumentException('Invalid IR v2 column reference');
+        }
+        $ref = trim($ref);
+        if (strpos($ref, '.') !== false) {
+            [$tablePart, $colPart] = explode('.', $ref, 2);
+            if ($requiredTable !== null && $tablePart !== $requiredTable) {
+                throw new \InvalidArgumentException(
+                    "Invalid IR v2 column reference '{$ref}': must belong to table '{$requiredTable}'"
+                );
+            }
+        } else {
+            $tablePart = $defaultTable;
+            $colPart   = $ref;
+        }
+        return self::quoteIdentifier($tablePart, $driver) . '.' . self::quoteIdentifier($colPart, $driver);
+    }
+
+    private static function requireAlias(array $spec, string $context): string
+    {
+        $alias = $spec['alias'] ?? null;
+        if (!is_string($alias) || $alias === '') {
+            throw new \InvalidArgumentException("Invalid IR v2 {$context}: missing 'alias'");
+        }
+        return $alias;
+    }
+
+    /**
+     * Build one group_keys entry.
+     *
+     * @return array{expr: string, alias: string}
+     */
+    private static function buildGroupKey(mixed $key, string $baseTable, string $dialect, ?string $driver): array
+    {
+        if (!is_array($key)) {
+            throw new \InvalidArgumentException('Invalid IR v2 group_keys entry: must be an object');
+        }
+        $alias = self::requireAlias($key, 'group_keys entry');
+        self::quoteIdentifier($alias, $driver);
+        $col  = self::qualifiedColumn($key['column'] ?? null, $baseTable, $driver);
+        $type = $key['type'] ?? null;
+
+        if ($type === 'date_bucket') {
+            $interval = $key['interval'] ?? null;
+            if (!is_string($interval) || !isset(self::DATE_BUCKET_SQL[$dialect][$interval])) {
+                throw self::unsupported('date_bucket interval ' . json_encode($interval));
+            }
+            $template = self::DATE_BUCKET_SQL[$dialect][$interval];
+        } elseif ($type === 'date_part') {
+            $part = $key['part'] ?? null;
+            if (!is_string($part) || !isset(self::DATE_PART_SQL[$dialect][$part])) {
+                throw self::unsupported('date_part part ' . json_encode($part));
+            }
+            $template = self::DATE_PART_SQL[$dialect][$part];
+        } else {
+            throw self::unsupported('group_keys type ' . json_encode($type));
+        }
+
+        return ['expr' => str_replace('{c}', $col, $template), 'alias' => $alias];
+    }
+
+    /**
+     * Build the LEFT JOIN (pre-aggregated subquery) and SELECT items for relation_aggregates[$index].
+     *
+     * @return array{0: string, 1: list<mixed>, 2: list<string>}
+     */
+    private static function buildRelationAggregate(mixed $rel, int $index, string $baseTable, ?string $driver): array
+    {
+        if (!is_array($rel)) {
+            throw new \InvalidArgumentException('Invalid IR v2 relation_aggregates entry: must be an object');
+        }
+        $table = $rel['table'] ?? null;
+        if (!is_string($table) || $table === '') {
+            throw new \InvalidArgumentException("Invalid IR v2 relation_aggregates entry: missing 'table'");
+        }
+        $tableSql = self::quoteIdentifier($table, $driver);
+        $fkSql    = self::qualifiedColumn($rel['foreign_key'] ?? null, $table, $driver, $table);
+        $refSql   = self::qualifiedColumn($rel['references'] ?? null, $baseTable, $driver, $baseTable);
+        $relAlias = self::quoteIdentifier("fp_rel_{$index}", $driver);
+
+        $aggregates = $rel['aggregates'] ?? null;
+        if (!is_array($aggregates) || empty($aggregates)) {
+            throw new \InvalidArgumentException("Invalid IR v2 relation_aggregates entry: 'aggregates' must be a non-empty list");
+        }
+
+        $innerSelects = ["{$fkSql} AS fk"];
+        $outerSelects = [];
+        foreach ($aggregates as $agg) {
+            if (!is_array($agg)) {
+                throw new \InvalidArgumentException('Invalid IR v2 relation aggregate: must be an object');
+            }
+            $fn = strtoupper(trim((string) preg_replace('/\s+/', ' ', (string) ($agg['function'] ?? ''))));
+            if (!in_array($fn, self::RELATION_FUNCTIONS, true)) {
+                throw self::unsupported('relation aggregate function ' . json_encode($agg['function'] ?? null));
+            }
+            $alias    = self::requireAlias($agg, 'relation aggregate');
+            $aliasSql = self::quoteIdentifier($alias, $driver);
+            $column   = $agg['column'] ?? null;
+
+            if ($column === '*') {
+                if ($fn !== 'COUNT') {
+                    throw new \InvalidArgumentException("Invalid IR v2 relation aggregate: '*' is only allowed with COUNT");
+                }
+                $expr = 'COUNT(*)';
+            } else {
+                $colSql = self::qualifiedColumn($column, $table, $driver, $table);
+                $expr   = $fn === 'COUNT DISTINCT' ? "COUNT(DISTINCT {$colSql})" : "{$fn}({$colSql})";
+            }
+            $innerSelects[] = "{$expr} AS {$aliasSql}";
+
+            $outerRef = "{$relAlias}.{$aliasSql}";
+            $outerSelects[] = str_starts_with($fn, 'COUNT')
+                ? "COALESCE({$outerRef}, 0) AS {$aliasSql}"
+                : "{$outerRef} AS {$aliasSql}";
+        }
+
+        $sub = 'SELECT ' . implode(', ', $innerSelects) . " FROM {$tableSql}";
+        $params = [];
+        $filters = $rel['filters'] ?? [];
+        if (!empty($filters)) {
+            if (!is_array($filters)) {
+                throw new \InvalidArgumentException("Invalid IR v2 relation_aggregates entry: 'filters' must be a list");
+            }
+            $qualified = [];
+            foreach ($filters as $f) {
+                if (!is_array($f) || !isset($f['column'])) {
+                    throw new \InvalidArgumentException("Filter missing 'column'");
+                }
+                $col = trim((string) $f['column']);
+                if (strpos($col, '.') !== false) {
+                    [$tPart] = explode('.', $col, 2);
+                    if ($tPart !== $table) {
+                        throw new \InvalidArgumentException(
+                            "Invalid IR v2 column reference '{$col}': must belong to table '{$table}'"
+                        );
+                    }
+                } else {
+                    $col = "{$table}.{$col}";
+                }
+                $f['column'] = $col;
+                $qualified[] = $f;
+            }
+            [$whereSql, $params] = self::buildConditionList($qualified, $driver);
+            if (trim($whereSql) !== '') {
+                $sub .= " WHERE {$whereSql}";
+            }
+        }
+        $sub .= " GROUP BY {$fkSql}";
+
+        $fkRef = $relAlias . '.' . self::quoteIdentifier('fk', $driver);
+        $join  = " LEFT JOIN ({$sub}) AS {$relAlias} ON {$fkRef} = {$refSql}";
+
+        return [$join, $params, $outerSelects];
+    }
+
+    /**
+     * Wrap an inner (grouped) query for then_aggregate.
+     *
+     * @param  array<string, mixed>                     $spec
+     * @param  array{sql: string, params: list<mixed>}  $inner
+     * @param  array<string, mixed>                     $ir
+     * @return array{sql: string, params: list<mixed>}
+     */
+    private static function wrapThenAggregate(array $spec, array $inner, array $ir, ?string $driver): array
+    {
+        $g = self::quoteIdentifier('g', $driver);
+        $selects = [];
+
+        $countAlias = $spec['group_count_alias'] ?? null;
+        if ($countAlias !== null && $countAlias !== '') {
+            if (!is_string($countAlias)) {
+                throw new \InvalidArgumentException('Invalid IR v2 then_aggregate: group_count_alias must be a string');
+            }
+            $selects[] = 'COUNT(*) AS ' . self::quoteIdentifier($countAlias, $driver);
+        }
+
+        $reducers = $spec['reducers'] ?? [];
+        if (!is_array($reducers)) {
+            throw new \InvalidArgumentException("Invalid IR v2 then_aggregate: 'reducers' must be a list");
+        }
+        $innerNames = self::innerOutputNames($ir);
+        foreach ($reducers as $r) {
+            if (!is_array($r)) {
+                throw new \InvalidArgumentException('Invalid IR v2 then_aggregate reducer: must be an object');
+            }
+            $fn = strtoupper(trim((string) ($r['function'] ?? '')));
+            if (!in_array($fn, self::REDUCER_FUNCTIONS, true)) {
+                throw self::unsupported('then_aggregate reducer function ' . json_encode($r['function'] ?? null));
+            }
+            $of = $r['of'] ?? null;
+            if (!is_string($of) || $of === '') {
+                throw new \InvalidArgumentException("Invalid IR v2 then_aggregate reducer: missing 'of'");
+            }
+            $ofSql = self::quoteIdentifier($of, $driver);
+            if ($innerNames !== null && !in_array($of, $innerNames, true)) {
+                throw new \InvalidArgumentException(
+                    "Invalid IR v2 then_aggregate reducer: '{$of}' is not a column produced by the inner query"
+                );
+            }
+            $alias = self::requireAlias($r, 'then_aggregate reducer');
+            $selects[] = "{$fn}({$g}.{$ofSql}) AS " . self::quoteIdentifier($alias, $driver);
+        }
+
+        if (empty($selects)) {
+            throw new \InvalidArgumentException(
+                'Invalid IR v2 then_aggregate: at least one of group_count_alias or reducers is required'
+            );
+        }
+
+        return [
+            'sql'    => 'SELECT ' . implode(', ', $selects) . " FROM ({$inner['sql']}) AS {$g}",
+            'params' => $inner['params'],
+        ];
+    }
+
+    /**
+     * Output column names of the inner query, or null when they cannot be determined (SELECT *).
+     *
+     * @param  array<string, mixed> $ir
+     * @return list<string>|null
+     */
+    private static function innerOutputNames(array $ir): ?array
+    {
+        $fields = $ir['fields'] ?? [];
+        if (empty($fields)) {
+            return null;
+        }
+        $names = [];
+        foreach ($fields as $f) {
+            if (!empty($f['alias'])) {
+                $names[] = (string) $f['alias'];
+            } elseif (($f['expression'] ?? null) === null && isset($f['column'])
+                && preg_match('/^(?:[a-zA-Z0-9_$]+\.)?([a-zA-Z0-9_$]+)$/', (string) $f['column'], $m)) {
+                $names[] = $m[1];
+            }
+        }
+        foreach (($ir['group_keys'] ?? []) ?: [] as $k) {
+            if (is_array($k) && isset($k['alias'])) {
+                $names[] = (string) $k['alias'];
+            }
+        }
+        foreach (($ir['relation_aggregates'] ?? []) ?: [] as $rel) {
+            foreach ((is_array($rel) ? ($rel['aggregates'] ?? []) : []) as $a) {
+                if (is_array($a) && isset($a['alias'])) {
+                    $names[] = (string) $a['alias'];
+                }
+            }
+        }
+        return $names;
     }
 
     // ── Private helpers ────────────────────────────────────────────────────

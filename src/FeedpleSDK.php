@@ -1746,11 +1746,53 @@ class FeedpleSDK
         return new SqlCompiler($policy);
     }
 
+    /** Maximum lifetime of a widget token, in seconds. */
+    public const WIDGET_TOKEN_MAX_TTL = 86400;
+
+    /**
+     * Mint a short-lived HS256 JWT for the Feedple admin widget (header `X-Widget-Token`).
+     *
+     * Call this from your own server after authenticating the admin, and hand the
+     * token to widget.js via `data-token` or a `data-token-url` endpoint.
+     *
+     * @param string $secret     The tenant's widget_signing_secret (never expose to browsers)
+     * @param string $publicKey  The tenant's widget public key (wpk_...)
+     * @param string $subject    The admin's identifier in your app (email or user id)
+     * @param int    $ttlSeconds Lifetime in seconds; capped at 86400
+     * @throws \InvalidArgumentException on empty arguments or a non-positive TTL
+     */
+    public static function createWidgetToken(string $secret, string $publicKey, string $subject, int $ttlSeconds = 3600): string
+    {
+        if ($secret === '' || trim($publicKey) === '' || trim($subject) === '') {
+            throw new \InvalidArgumentException('createWidgetToken requires a non-empty secret, publicKey and subject');
+        }
+        if ($ttlSeconds <= 0) {
+            throw new \InvalidArgumentException('createWidgetToken requires a positive ttlSeconds');
+        }
+        $ttl = min($ttlSeconds, self::WIDGET_TOKEN_MAX_TTL);
+        $iat = time();
+
+        $b64 = static fn(string $data): string => rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+        $flags = JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR;
+
+        $header  = $b64(json_encode(['alg' => 'HS256', 'typ' => 'JWT'], $flags));
+        $payload = $b64(json_encode([
+            'wpk'  => $publicKey,
+            'sub'  => $subject,
+            'role' => 'admin',
+            'iat'  => $iat,
+            'exp'  => $iat + $ttl,
+        ], $flags));
+        $signature = $b64(hash_hmac('sha256', "{$header}.{$payload}", $secret, true));
+
+        return "{$header}.{$payload}.{$signature}";
+    }
+
     /**
      * Execute an IR query against the database and return results.
      *
      * @param  array<string, mixed> $ir
-     * @return array{rows: list<array<string, mixed>>, count: int, duration_ms: int}
+     * @return array{rows: list<array<string, mixed>>, count: int, duration_ms: int, ir_version: int}
      */
     public function executeIr(array $ir): array
     {
@@ -1816,6 +1858,7 @@ class FeedpleSDK
             'rows'        => $rows,
             'count'       => $rowCount,
             'duration_ms' => $durationMs,
+            'ir_version'  => IrBuilder::IR_VERSION,
         ];
     }
 
@@ -1826,6 +1869,16 @@ class FeedpleSDK
      */
     private static function isScalarCountQuery(array $ir): bool
     {
+        // IR v2: group_keys make the query grouped; relation_aggregates add columns.
+        // then_aggregate returns one summary row; it is a scalar count only when it
+        // consists of group_count_alias alone.
+        if (!empty($ir['group_keys']) || !empty($ir['relation_aggregates'])) {
+            return false;
+        }
+        if (!empty($ir['then_aggregate'])) {
+            $ta = $ir['then_aggregate'];
+            return is_array($ta) && !empty($ta['group_count_alias']) && empty($ta['reducers']);
+        }
         $groupBy = $ir['group_by'] ?? [];
         $groupBy = is_array($groupBy) ? $groupBy : [$groupBy];
         foreach ($groupBy as $g) {

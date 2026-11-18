@@ -552,6 +552,7 @@ class FeedpleWebSocket
                 'rows'        => $result['rows'],
                 'count'       => $result['count'],
                 'duration_ms' => $result['duration_ms'],
+                'ir_version'  => IrBuilder::IR_VERSION,
             ]));
         } catch (\Throwable $e) {
             $this->logger->error(
